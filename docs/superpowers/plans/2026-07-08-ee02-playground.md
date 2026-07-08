@@ -6,7 +6,7 @@
 
 **Architecture:** Single PlatformIO project, Arduino framework, one `src/main.cpp` that grows milestone by milestone. Seeed_GFX drives the panel (selected entirely via two build flags — no library file edits). Verification is on-hardware: every task ends with something observable on the panel or serial monitor.
 
-**Tech Stack:** PlatformIO CLI, Arduino-ESP32, Seeed_GFX (Seeed-Studio/Seeed_GFX), JPEGDecoder (bodmer), ESP32 deep-sleep APIs.
+**Tech Stack:** PlatformIO CLI, Arduino-ESP32, Seeed_GFX (Seeed-Studio/Seeed_GFX), JPEGDecoder (bodmer), WiFiManager (tzapu), ESP32 deep-sleep APIs.
 
 ## Global Constraints
 
@@ -22,7 +22,8 @@
 - Serial is USB-CDC at 115200 (`ARDUINO_USB_CDC_ON_BOOT=1` comes from the board definition). After flashing, reopen the monitor with `pio device monitor`.
 - Wi-Fi is 2.4 GHz only (ESP32-S3 has no 5 GHz).
 - All builds/flashes via PlatformIO CLI: `pio run`, `pio run -t upload`, `pio device monitor`. Never the Arduino IDE.
-- `src/secrets.h` is git-ignored; `src/secrets.h.example` is committed.
+- No credentials in the repo: Wi-Fi provisioning happens on-device via the WiFiManager captive portal (AP `EE02-Setup`, portal at `http://192.168.4.1`, network list with signal strength); credentials persist in NVS across boots and deep sleep. Holding the refresh button (GPIO3) at power-on clears them.
+- Image source: `https://picsum.photos/1200/1600` — a random JPEG at exactly panel size. HTTPS via `WiFiClientSecure` with `setInsecure()` (no cert validation in a learning repo) and redirects followed (picsum 302s to its CDN).
 - No unit-test scaffolding. The test cycle per task is: build → flash → observe on panel/serial → commit.
 
 **Troubleshooting facts (apply in any task):**
@@ -355,19 +356,17 @@ git commit -m "Task 3: three demo screens switched by EE02 user buttons"
 
 ---
 
-### Task 4: Milestone 3 — Wi-Fi + HTTP image fetch
+### Task 4: Milestone 3 — Wi-Fi captive-portal provisioning + picsum image fetch
 
 **Files:**
-- Create: `src/secrets.h.example`
-- Create: `src/secrets.h` (git-ignored; real values)
-- Modify: `platformio.ini` (add JPEGDecoder)
+- Modify: `platformio.ini` (add WiFiManager + JPEGDecoder)
 - Modify: `src/main.cpp` (replace entirely)
 
 **Interfaces:**
 - Consumes: `EPaper epaper`, button constants and `pressed()` from Task 3.
-- Produces: `bool connectWifi()`, `bool fetchAndShowImage()` — Task 5 calls both. `secrets.h` macros: `WIFI_SSID`, `WIFI_PASS`, `IMAGE_URL` (all `#define` strings).
+- Produces: `bool connectWifi()` (WiFiManager autoConnect: saved-credentials connect or captive portal), `bool fetchAndShowImage()`, `void showError(const String&)` — Task 5 reuses all three. The forget-wifi-at-boot gesture (refresh held at power-on).
 
-- [ ] **Step 1: Add JPEGDecoder to `platformio.ini`**
+- [ ] **Step 1: Add libraries to `platformio.ini`**
 
 Replace the `lib_deps` block with:
 
@@ -375,39 +374,19 @@ Replace the `lib_deps` block with:
 lib_deps =
     https://github.com/Seeed-Studio/Seeed_GFX.git
     bodmer/JPEGDecoder@^2.0.0
+    tzapu/WiFiManager@^2.0.17
 ```
 
-- [ ] **Step 2: Write `src/secrets.h.example`**
-
-```cpp
-#pragma once
-#define WIFI_SSID "your-2.4ghz-ssid"
-#define WIFI_PASS "your-password"
-// Any URL returning a baseline JPEG sized exactly 1200x1600.
-// e.g. the myframe server: http://<nas-ip>:8080/photo/1200/1600
-#define IMAGE_URL "http://192.168.1.10:8080/photo/1200/1600"
-```
-
-- [ ] **Step 3: Create `src/secrets.h`**
-
-Copy the example and fill in real values (ask the user for SSID/password/NAS IP if not on hand — do not invent them):
-
-```bash
-cp src/secrets.h.example src/secrets.h
-# then edit src/secrets.h with real values
-```
-
-Confirm it is ignored: `git status` must NOT list `src/secrets.h`.
-
-- [ ] **Step 4: Replace `src/main.cpp`**
+- [ ] **Step 2: Replace `src/main.cpp`**
 
 ```cpp
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <JPEGDecoder.h>
-#include "secrets.h"
 
 EPaper epaper;
 
@@ -415,6 +394,9 @@ constexpr uint8_t BTN_PREV = 2;
 constexpr uint8_t BTN_REFRESH = 3;
 constexpr uint8_t BTN_NEXT = 5;
 constexpr uint8_t LED_PIN = 21; // active-LOW
+
+const char *AP_NAME = "EE02-Setup";
+const char *IMAGE_URL = "https://picsum.photos/1200/1600";
 
 void showError(const String &msg) {
     epaper.fillScreen(TFT_WHITE);
@@ -425,30 +407,49 @@ void showError(const String &msg) {
     epaper.update();
 }
 
+void showProvisioningScreen() {
+    epaper.fillScreen(TFT_WHITE);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString("Wi-Fi setup", 20, 40, 4);
+    epaper.drawString("1. On your phone, join the Wi-Fi network:", 20, 160, 4);
+    epaper.setTextColor(TFT_BLUE, TFT_WHITE);
+    epaper.drawString(AP_NAME, 60, 220, 4);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString("2. Open http://192.168.4.1 in a browser", 20, 300, 4);
+    epaper.drawString("3. Pick your 2.4 GHz network, enter its password", 20, 360, 4);
+    epaper.drawString("The board remembers it for future boots.", 20, 480, 4);
+    epaper.drawString("Hold the refresh button at power-on to forget.", 20, 540, 4);
+    epaper.update();
+}
+
+void configModeCallback(WiFiManager *wm) {
+    Serial.printf("config portal up: join \"%s\", then open http://%s\n",
+                  AP_NAME, WiFi.softAPIP().toString().c_str());
+    Serial.println("drawing provisioning instructions (takes ~20-30 s)...");
+    showProvisioningScreen();
+    Serial.println("instructions on panel");
+}
+
+// Connect with saved credentials, or open the captive portal on first
+// boot / after forget. Blocks until connected or portal timeout.
 bool connectWifi() {
-    Serial.printf("connecting to %s", WIFI_SSID);
-    WiFi.mode(WIFI_STA);
-    for (int attempt = 0; attempt < 3; attempt++) {
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
-        uint32_t start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-            delay(500);
-            Serial.print(".");
-        }
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("\nconnected, IP %s, RSSI %d dBm\n",
-                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
-            return true;
-        }
-        Serial.printf("\nattempt %d failed, retrying\n", attempt + 1);
-        WiFi.disconnect(true);
-        delay(1000);
+    WiFiManager wm;
+    wm.setAPCallback(configModeCallback);
+    wm.setConfigPortalTimeout(300); // give up after 5 min, don't hang forever
+    Serial.println("connecting (saved credentials, or captive portal)...");
+    bool ok = wm.autoConnect(AP_NAME);
+    if (ok) {
+        Serial.printf("connected to %s, IP %s, RSSI %d dBm\n",
+                      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                      WiFi.RSSI());
+    } else {
+        Serial.println("provisioning timed out");
     }
-    return false;
+    return ok;
 }
 
 // Decode the JPEG in buf and push it MCU block by MCU block.
-// Image must be exactly 1200x1600 so blocks tile without clipping.
+// Image is exactly 1200x1600 so blocks tile without clipping.
 void renderJpeg(uint8_t *buf, size_t len) {
     JpegDec.decodeArray(buf, len);
     Serial.printf("jpeg: %d x %d, MCU %d x %d\n", JpegDec.width,
@@ -463,8 +464,11 @@ void renderJpeg(uint8_t *buf, size_t len) {
 
 bool fetchAndShowImage() {
     digitalWrite(LED_PIN, LOW);
+    WiFiClientSecure client;
+    client.setInsecure(); // learning repo: skip cert validation
     HTTPClient http;
-    http.begin(IMAGE_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // picsum 302s to its CDN
+    http.begin(client, IMAGE_URL);
     http.setTimeout(20000);
     Serial.printf("GET %s\n", IMAGE_URL);
     int code = http.GET();
@@ -535,9 +539,9 @@ bool pressed(uint8_t pin) {
 void setup() {
     Serial.begin(115200);
     delay(2000);
-    Serial.println("ee02-playground: task 4 — wifi image fetch");
+    Serial.println("ee02-playground: task 4 — wifi provisioning + picsum fetch");
 
-    pinMode(BTN_PREV, INPUT);
+    pinMode(BTN_PREV, INPUT);    // external pull-ups on board
     pinMode(BTN_REFRESH, INPUT);
     pinMode(BTN_NEXT, INPUT);
     pinMode(LED_PIN, OUTPUT);
@@ -545,8 +549,14 @@ void setup() {
 
     epaper.begin();
 
+    if (digitalRead(BTN_REFRESH) == LOW) {
+        Serial.println("refresh held at boot — forgetting saved wifi");
+        WiFiManager wm;
+        wm.resetSettings();
+    }
+
     if (!connectWifi()) {
-        showError("wifi connect failed: " + String(WIFI_SSID));
+        showError("wifi setup failed or timed out");
         return;
     }
     fetchAndShowImage();
@@ -555,7 +565,7 @@ void setup() {
 void loop() {
     if (pressed(BTN_REFRESH)) {
         if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
-            showError("wifi connect failed: " + String(WIFI_SSID));
+            showError("wifi reconnect failed");
             return;
         }
         fetchAndShowImage();
@@ -564,29 +574,31 @@ void loop() {
 }
 ```
 
-- [ ] **Step 5: Build**
+- [ ] **Step 3: Build**
 
 ```bash
 pio run
 ```
 
-Expected: `SUCCESS` (JPEGDecoder downloads on first build).
+Expected: `SUCCESS` (WiFiManager and JPEGDecoder download on first build).
 
-- [ ] **Step 6: Flash and observe**
-
-Precondition: the image URL must serve a baseline JPEG at exactly 1200×1600 (myframe's `/photo/1200/1600` does).
+- [ ] **Step 4: Flash and observe first-boot provisioning**
 
 ```bash
 pio run -t upload && pio device monitor
 ```
 
-Expected serial: `connected, IP …`, `GET …`, `content-length: …`, `jpeg: 1200 x 1600 …`, `updating panel…`; the fetched photo appears on the panel (six-color dithered — colors will look posterized, that's the medium, not a bug). Pressing **refresh** fetches a different image.
+Expected serial (no credentials saved yet): `connecting (saved credentials, or captive portal)...` then `config portal up: join "EE02-Setup", then open http://192.168.4.1` and `instructions on panel`; the panel shows the setup instructions.
 
-- [ ] **Step 7: Commit**
+**User steps (cannot be automated):** join `EE02-Setup` from a phone, open `http://192.168.4.1`, pick the home network from the scan list (signal strengths shown), enter the password. Then expected serial: `connected to <ssid>, IP …`, `GET https://picsum.photos/1200/1600`, `content-length: …`, `jpeg: 1200 x 1600 …`, `updating panel…`; a random photo appears (six-color dithered — posterized colors are the medium, not a bug). Pressing **refresh** fetches a different image. Power-cycling the board must reconnect without the portal.
+
+Known risk: if picsum ever serves a *progressive* JPEG, JPEGDecoder (baseline-only) will fail to decode — serial would show a decode failure / garbage dimensions after `content-length`. If observed, report it; do not try to fix inline.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add platformio.ini src/secrets.h.example src/main.cpp
-git commit -m "Task 4: fetch JPEG over wifi and render on panel"
+git add platformio.ini src/main.cpp
+git commit -m "Task 4: WiFiManager captive-portal provisioning + picsum JPEG fetch"
 ```
 
 ---
@@ -597,8 +609,8 @@ git commit -m "Task 4: fetch JPEG over wifi and render on panel"
 - Modify: `src/main.cpp` (replace entirely)
 
 **Interfaces:**
-- Consumes: `connectWifi()`, `fetchAndShowImage()` pattern, button/pin constants from Task 4.
-- Produces: final firmware shape: boot → fetch → overlay status footer → deep sleep (timer + any-button wake). `float readBatteryVoltage()` and RTC-persistent `bootCount`.
+- Consumes: `connectWifi()` (WiFiManager), `fetchAndShowImage()` pattern, `showError()`, button/pin constants from Task 4.
+- Produces: final firmware shape: boot → (optional forget-wifi) → connect → fetch → overlay status footer → deep sleep (timer + any-button wake). `float readBatteryVoltage()` and RTC-persistent `bootCount`.
 
 - [ ] **Step 1: Replace `src/main.cpp`**
 
@@ -606,9 +618,10 @@ git commit -m "Task 4: fetch JPEG over wifi and render on panel"
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <JPEGDecoder.h>
-#include "secrets.h"
 
 EPaper epaper;
 
@@ -622,6 +635,9 @@ constexpr uint8_t BATTERY_ADC_PIN = 1;   // A0, via /2 divider
 constexpr uint8_t BATTERY_EN_PIN = 6;    // HIGH enables the divider
 constexpr uint8_t EPAPER_EN_PIN = 43;    // panel power enable
 constexpr uint64_t SLEEP_SECONDS = 60 * 60; // 1 hour
+
+const char *AP_NAME = "EE02-Setup";
+const char *IMAGE_URL = "https://picsum.photos/1200/1600";
 
 RTC_DATA_ATTR uint32_t bootCount = 0;
 
@@ -657,26 +673,43 @@ void showError(const String &msg) {
     epaper.update();
 }
 
+void showProvisioningScreen() {
+    epaper.fillScreen(TFT_WHITE);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString("Wi-Fi setup", 20, 40, 4);
+    epaper.drawString("1. On your phone, join the Wi-Fi network:", 20, 160, 4);
+    epaper.setTextColor(TFT_BLUE, TFT_WHITE);
+    epaper.drawString(AP_NAME, 60, 220, 4);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString("2. Open http://192.168.4.1 in a browser", 20, 300, 4);
+    epaper.drawString("3. Pick your 2.4 GHz network, enter its password", 20, 360, 4);
+    epaper.drawString("The board remembers it for future boots.", 20, 480, 4);
+    epaper.drawString("Hold the refresh button at power-on to forget.", 20, 540, 4);
+    epaper.update();
+}
+
+void configModeCallback(WiFiManager *wm) {
+    Serial.printf("config portal up: join \"%s\", then open http://%s\n",
+                  AP_NAME, WiFi.softAPIP().toString().c_str());
+    Serial.println("drawing provisioning instructions (takes ~20-30 s)...");
+    showProvisioningScreen();
+    Serial.println("instructions on panel");
+}
+
 bool connectWifi() {
-    Serial.printf("connecting to %s", WIFI_SSID);
-    WiFi.mode(WIFI_STA);
-    for (int attempt = 0; attempt < 3; attempt++) {
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
-        uint32_t start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-            delay(500);
-            Serial.print(".");
-        }
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("\nconnected, IP %s, RSSI %d dBm\n",
-                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
-            return true;
-        }
-        Serial.printf("\nattempt %d failed, retrying\n", attempt + 1);
-        WiFi.disconnect(true);
-        delay(1000);
+    WiFiManager wm;
+    wm.setAPCallback(configModeCallback);
+    wm.setConfigPortalTimeout(300);
+    Serial.println("connecting (saved credentials, or captive portal)...");
+    bool ok = wm.autoConnect(AP_NAME);
+    if (ok) {
+        Serial.printf("connected to %s, IP %s, RSSI %d dBm\n",
+                      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                      WiFi.RSSI());
+    } else {
+        Serial.println("provisioning timed out");
     }
-    return false;
+    return ok;
 }
 
 void renderJpeg(uint8_t *buf, size_t len) {
@@ -695,8 +728,11 @@ void renderJpeg(uint8_t *buf, size_t len) {
 // overlays the status footer first). Returns false after drawing an
 // error screen (already updated) on failure.
 bool fetchImage() {
+    WiFiClientSecure client;
+    client.setInsecure();
     HTTPClient http;
-    http.begin(IMAGE_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.begin(client, IMAGE_URL);
     http.setTimeout(20000);
     Serial.printf("GET %s\n", IMAGE_URL);
     int code = http.GET();
@@ -767,6 +803,7 @@ void setup() {
     Serial.printf("ee02-playground: task 5 — boot #%u, wake: %s\n",
                   bootCount, wakeReason());
 
+    pinMode(BTN_REFRESH, INPUT);
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW); // LED on while awake
 
@@ -775,8 +812,17 @@ void setup() {
 
     epaper.begin();
 
+    // Hold refresh through power-on (still held after the 2 s boot delay)
+    // to forget saved wifi. A short press that merely woke us from deep
+    // sleep is released by now and does NOT trigger this.
+    if (digitalRead(BTN_REFRESH) == LOW) {
+        Serial.println("refresh held at boot — forgetting saved wifi");
+        WiFiManager wm;
+        wm.resetSettings();
+    }
+
     if (!connectWifi()) {
-        showError("wifi connect failed: " + String(WIFI_SSID));
+        showError("wifi setup failed or timed out");
     } else if (fetchImage()) {
         drawStatusFooter(vbat);
         Serial.println("updating panel (takes ~20-30 s)...");
@@ -805,9 +851,9 @@ Expected: `SUCCESS`.
 pio run -t upload && pio device monitor
 ```
 
-Expected: serial shows `boot #1, wake: power-on/reset`, a plausible battery voltage (≈3.5–4.2 V with a battery, ≈4.3–5 V shown if USB-only powers VBAT rail — record what you see), image renders with a footer line `boot #1  wake: power-on/reset  vbat: …`, then `sleeping 3600 s…` and serial goes quiet (deep sleep drops the USB port — this is expected).
+Expected: serial shows `boot #1, wake: power-on/reset`, a battery voltage line (≈3.5–4.2 V with a battery; USB-only readings may sit higher — record what appears), `connected to <ssid>…` (saved credentials from Task 4 — no portal), image renders with footer `boot #1  wake: power-on/reset  vbat: …`, then `sleeping 3600 s…` and serial goes quiet (deep sleep drops the USB port — expected).
 
-- [ ] **Step 4: Verify button wake**
+- [ ] **Step 4: Verify button wake (user step)**
 
 Press any of the three user buttons. The USB port re-enumerates; re-run `pio device monitor` quickly.
 
@@ -826,6 +872,6 @@ git commit -m "Task 5: battery reading, status footer, deep sleep with timer+but
 
 - Milestone 1 (hello display) → Task 2
 - Milestone 2 (buttons & LED) → Task 3
-- Milestone 3 (Wi-Fi + fetch, secrets.h, error screens) → Task 4
+- Milestone 3 (Wi-Fi captive-portal provisioning, picsum fetch, error screens) → Task 4
 - Milestone 4 (deep sleep & battery) → Task 5
 - Toolchain/scaffold, PSRAM/flash overrides, checked-in display config (as build flags) → Task 1

@@ -49,10 +49,16 @@ before the next one starts.
    switch between a few demo screens; onboard LED gives feedback. Teaches
    GPIO input, debouncing, and full- vs. partial-refresh behavior on Spectra 6.
    *Success:* pressing each button visibly changes the screen.
-3. **Wi-Fi + fetch.** Connect to the LAN, HTTP-GET an image, decode and
-   render it. Wi-Fi credentials live in an untracked `secrets.h` (a
-   `secrets.h.example` is committed). *Success:* an image fetched over the
-   network appears on the panel.
+3. **Wi-Fi + fetch.** First-boot Wi-Fi provisioning via the standard ESP32
+   captive-portal flow (WiFiManager library): the device opens an
+   `EE02-Setup` hotspot; the user joins it and opens `http://192.168.4.1`,
+   which lists nearby networks with signal strength; the chosen
+   SSID/password persist in flash (NVS) for future boots. Holding the
+   refresh button at power-on clears saved credentials. Once connected,
+   HTTP-GET a random 1200×1600 JPEG from picsum.photos (HTTPS), decode,
+   render. No credentials ever live in the repo. *Success:* portal
+   provisioning works from a phone, and a fetched image appears on the
+   panel.
 4. **Deep sleep & battery.** Read battery voltage via ADC, display it, then
    enter deep sleep with timer and button wake sources. *Success:* measurable
    sleep current behavior (device wakes on schedule and on button press) and
