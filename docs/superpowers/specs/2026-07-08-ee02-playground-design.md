@@ -23,9 +23,10 @@ but that is explicitly out of scope here.
 - **Display library:** `Seeed_GFX` (Seeed-Studio/Seeed_Arduino_LCD), declared
   in `lib_deps`. It ships drivers for large ePaper panels including the
   13.3" E6 (Spectra 6) class and is explicitly PlatformIO-compatible.
-- **Display config:** the EE02-specific driver/pin configuration (generated
-  once via Seeed's online config tool) is checked in as a header so the repo
-  builds without external setup steps.
+- **Display config:** the EE02-specific driver/pin selection (two defines
+  from Seeed's config tool: `BOARD_SCREEN_COMBO=510`,
+  `USE_XIAO_EPAPER_DISPLAY_BOARD_EE02`) is checked in as `build_flags` in
+  `platformio.ini`, so the repo builds without external setup steps.
 
 ## Firmware structure
 
