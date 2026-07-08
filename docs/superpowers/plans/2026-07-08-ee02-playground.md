@@ -23,7 +23,7 @@
 - Wi-Fi is 2.4 GHz only (ESP32-S3 has no 5 GHz).
 - All builds/flashes via PlatformIO CLI: `pio run`, `pio run -t upload`, `pio device monitor`. Never the Arduino IDE.
 - No credentials in the repo: Wi-Fi provisioning happens on-device via the WiFiManager captive portal (AP `EE02-Setup`, portal at `http://192.168.4.1`, network list with signal strength); credentials persist in NVS across boots and deep sleep. Holding the refresh button (GPIO3) at power-on clears them.
-- Image source: `https://picsum.photos/1200/1600` — a random JPEG at exactly panel size. HTTPS via `WiFiClientSecure` with `setInsecure()` (no cert validation in a learning repo) and redirects followed (picsum 302s to its CDN).
+- Image source: random picsum.photos picture at exactly panel size, fetched through the images.weserv.nl proxy which re-encodes to **baseline** JPEG (`https://images.weserv.nl/?url=picsum.photos/1200/1600%3Frandom%3D<n>&output=jpg` with a random `<n>` per fetch to defeat the proxy cache). Direct picsum URLs serve *progressive* JPEGs, which embedded decoders (JPEGDecoder et al.) cannot parse — verified 2026-07-08. HTTPS via `WiFiClientSecure` with `setInsecure()` (no cert validation in a learning repo); redirects followed.
 - No unit-test scaffolding. The test cycle per task is: build → flash → observe on panel/serial → commit.
 
 **Troubleshooting facts (apply in any task):**
@@ -396,7 +396,14 @@ constexpr uint8_t BTN_NEXT = 5;
 constexpr uint8_t LED_PIN = 21; // active-LOW
 
 const char *AP_NAME = "EE02-Setup";
-const char *IMAGE_URL = "https://picsum.photos/1200/1600";
+
+// picsum serves progressive JPEGs, which embedded decoders can't parse;
+// images.weserv.nl re-encodes to baseline. The random= value defeats
+// weserv's cache so every fetch is a different picture.
+String imageUrl() {
+    return "https://images.weserv.nl/?url=picsum.photos/1200/1600"
+           "%3Frandom%3D" + String(esp_random()) + "&output=jpg";
+}
 
 void showError(const String &msg) {
     epaper.fillScreen(TFT_WHITE);
@@ -467,10 +474,11 @@ bool fetchAndShowImage() {
     WiFiClientSecure client;
     client.setInsecure(); // learning repo: skip cert validation
     HTTPClient http;
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // picsum 302s to its CDN
-    http.begin(client, IMAGE_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    String url = imageUrl();
+    http.begin(client, url);
     http.setTimeout(20000);
-    Serial.printf("GET %s\n", IMAGE_URL);
+    Serial.printf("GET %s\n", url.c_str());
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
         Serial.printf("HTTP error: %d\n", code);
@@ -590,9 +598,9 @@ pio run -t upload && pio device monitor
 
 Expected serial (no credentials saved yet): `connecting (saved credentials, or captive portal)...` then `config portal up: join "EE02-Setup", then open http://192.168.4.1` and `instructions on panel`; the panel shows the setup instructions.
 
-**User steps (cannot be automated):** join `EE02-Setup` from a phone, open `http://192.168.4.1`, pick the home network from the scan list (signal strengths shown), enter the password. Then expected serial: `connected to <ssid>, IP …`, `GET https://picsum.photos/1200/1600`, `content-length: …`, `jpeg: 1200 x 1600 …`, `updating panel…`; a random photo appears (six-color dithered — posterized colors are the medium, not a bug). Pressing **refresh** fetches a different image. Power-cycling the board must reconnect without the portal.
+**User steps (cannot be automated):** join `EE02-Setup` from a phone, open `http://192.168.4.1`, pick the home network from the scan list (signal strengths shown), enter the password. Then expected serial: `connected to <ssid>, IP …`, `GET https://images.weserv.nl/…`, `content-length: …`, `jpeg: 1200 x 1600 …`, `updating panel…`; a random photo appears (six-color dithered — posterized colors are the medium, not a bug). Pressing **refresh** fetches a different image. Power-cycling the board must reconnect without the portal.
 
-Known risk: if picsum ever serves a *progressive* JPEG, JPEGDecoder (baseline-only) will fail to decode — serial would show a decode failure / garbage dimensions after `content-length`. If observed, report it; do not try to fix inline.
+Note: picsum direct URLs serve progressive JPEGs (JPEGDecoder decodes them as 0×0 — observed on hardware 2026-07-08), which is why the URL goes through images.weserv.nl for baseline re-encode. If serial ever shows `jpeg: 0 x 0` again, the proxy output changed — re-verify with `curl -sL '<url>' -o x.jpg && file x.jpg` (must say `baseline`).
 
 - [ ] **Step 5: Commit**
 
@@ -637,7 +645,14 @@ constexpr uint8_t EPAPER_EN_PIN = 43;    // panel power enable
 constexpr uint64_t SLEEP_SECONDS = 60 * 60; // 1 hour
 
 const char *AP_NAME = "EE02-Setup";
-const char *IMAGE_URL = "https://picsum.photos/1200/1600";
+
+// picsum serves progressive JPEGs, which embedded decoders can't parse;
+// images.weserv.nl re-encodes to baseline. The random= value defeats
+// weserv's cache so every fetch is a different picture.
+String imageUrl() {
+    return "https://images.weserv.nl/?url=picsum.photos/1200/1600"
+           "%3Frandom%3D" + String(esp_random()) + "&output=jpg";
+}
 
 RTC_DATA_ATTR uint32_t bootCount = 0;
 
@@ -732,9 +747,10 @@ bool fetchImage() {
     client.setInsecure();
     HTTPClient http;
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.begin(client, IMAGE_URL);
+    String url = imageUrl();
+    http.begin(client, url);
     http.setTimeout(20000);
-    Serial.printf("GET %s\n", IMAGE_URL);
+    Serial.printf("GET %s\n", url.c_str());
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
         http.end();
