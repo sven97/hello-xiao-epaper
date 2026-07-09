@@ -14,7 +14,13 @@ constexpr uint8_t BTN_NEXT = 5;
 constexpr uint8_t LED_PIN = 21; // active-LOW
 
 const char *AP_NAME = "EE02-Setup";
-const char *IMAGE_URL = "https://picsum.photos/1200/1600";
+// picsum serves progressive JPEGs, which embedded decoders can't parse;
+// images.weserv.nl re-encodes to baseline. The random= value defeats
+// weserv's cache so every fetch is a different picture.
+String imageUrl() {
+    return "https://images.weserv.nl/?url=picsum.photos/1200/1600"
+           "%3Frandom%3D" + String(esp_random()) + "&output=jpg";
+}
 
 void showError(const String &msg) {
     epaper.fillScreen(TFT_WHITE);
@@ -85,10 +91,11 @@ bool fetchAndShowImage() {
     WiFiClientSecure client;
     client.setInsecure(); // learning repo: skip cert validation
     HTTPClient http;
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // picsum 302s to its CDN
-    http.begin(client, IMAGE_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    String url = imageUrl();
+    http.begin(client, url);
     http.setTimeout(20000);
-    Serial.printf("GET %s\n", IMAGE_URL);
+    Serial.printf("GET %s\n", url.c_str());
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
         Serial.printf("HTTP error: %d\n", code);
