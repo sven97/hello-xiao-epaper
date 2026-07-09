@@ -49,6 +49,30 @@ int32_t readBatteryMv() {
     return (int32_t)(sumMv / 10) * 2; // /2 divider on the board
 }
 
+// Rough state-of-charge from a typical Li-ion discharge curve (resting
+// voltage). No fuel gauge on board, so this is an estimate: reads a few
+// percent high while charging and low under load.
+int batteryPercent(int32_t mv) {
+    struct Point { int16_t mv; uint8_t pct; };
+    static const Point CURVE[] = {
+        {4200, 100}, {4100, 94}, {4000, 85}, {3900, 74}, {3800, 62},
+        {3700, 48},  {3600, 29}, {3500, 13}, {3400, 6},  {3300, 3},
+        {3200, 1},   {3000, 0},
+    };
+    const int N = sizeof(CURVE) / sizeof(CURVE[0]);
+    if (mv >= CURVE[0].mv) return 100;
+    if (mv <= CURVE[N - 1].mv) return 0;
+    for (int i = 1; i < N; i++) {
+        if (mv >= CURVE[i].mv) {
+            return CURVE[i].pct +
+                   (int)(mv - CURVE[i].mv) *
+                       (CURVE[i - 1].pct - CURVE[i].pct) /
+                       (CURVE[i - 1].mv - CURVE[i].mv);
+        }
+    }
+    return 0;
+}
+
 const char *wakeReason() {
     switch (esp_sleep_get_wakeup_cause()) {
         case ESP_SLEEP_WAKEUP_TIMER: return "timer";
@@ -291,7 +315,8 @@ bool fetchImage() {
 void drawStatusFooter(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
     String status = "boot #" + String(bootCount) + "  wake: " +
                     wakeReason() + "  vbat: " +
-                    String(vbatMv / 1000.0f, 2) + " V";
+                    String(vbatMv / 1000.0f, 2) + " V ~" +
+                    String(batteryPercent(vbatMv)) + "%";
     if (haveDelta) {
         status += " (";
         if (deltaMv >= 0) status += "+";
@@ -341,10 +366,11 @@ void setup() {
     int32_t deltaMv = haveDelta ? vbatMv - lastVbatMv : 0;
     lastVbatMv = vbatMv;
     if (haveDelta)
-        Serial.printf("battery: %.2f V (%+d mV since last wake)\n",
-                      vbatMv / 1000.0f, (int)deltaMv);
+        Serial.printf("battery: %.2f V ~%d%% (%+d mV since last wake)\n",
+                      vbatMv / 1000.0f, batteryPercent(vbatMv), (int)deltaMv);
     else
-        Serial.printf("battery: %.2f V\n", vbatMv / 1000.0f);
+        Serial.printf("battery: %.2f V ~%d%%\n",
+                      vbatMv / 1000.0f, batteryPercent(vbatMv));
 
     epaper.begin();
 
