@@ -6,7 +6,7 @@
 
 **Architecture:** Single PlatformIO project, Arduino framework, one `src/main.cpp` that grows milestone by milestone. Seeed_GFX drives the panel (selected entirely via two build flags — no library file edits). Verification is on-hardware: every task ends with something observable on the panel or serial monitor.
 
-**Tech Stack:** PlatformIO CLI, Arduino-ESP32, Seeed_GFX (Seeed-Studio/Seeed_GFX), JPEGDecoder (bodmer), ESP32 deep-sleep APIs.
+**Tech Stack:** PlatformIO CLI, Arduino-ESP32, Seeed_GFX (Seeed-Studio/Seeed_GFX), JPEGDecoder (bodmer), WiFiManager (tzapu), ESP32 deep-sleep APIs.
 
 ## Global Constraints
 
@@ -22,8 +22,10 @@
 - Serial is USB-CDC at 115200 (`ARDUINO_USB_CDC_ON_BOOT=1` comes from the board definition). After flashing, reopen the monitor with `pio device monitor`.
 - Wi-Fi is 2.4 GHz only (ESP32-S3 has no 5 GHz).
 - All builds/flashes via PlatformIO CLI: `pio run`, `pio run -t upload`, `pio device monitor`. Never the Arduino IDE.
-- `src/secrets.h` is git-ignored; `src/secrets.h.example` is committed.
+- No credentials in the repo: Wi-Fi provisioning happens on-device via the WiFiManager captive portal (AP `EE02-Setup`, portal at `http://192.168.4.1`, network list with signal strength); credentials persist in NVS across boots and deep sleep. Holding the refresh button (GPIO3) at power-on clears them.
+- Image source: random picsum.photos picture at exactly panel size, fetched through the images.weserv.nl proxy which re-encodes to **baseline** JPEG (`https://images.weserv.nl/?url=picsum.photos/1200/1600%3Frandom%3D<n>&output=jpg` with a random `<n>` per fetch to defeat the proxy cache). Direct picsum URLs serve *progressive* JPEGs, which embedded decoders (JPEGDecoder et al.) cannot parse — verified 2026-07-08. HTTPS via `WiFiClientSecure` with `setInsecure()` (no cert validation in a learning repo); redirects followed.
 - No unit-test scaffolding. The test cycle per task is: build → flash → observe on panel/serial → commit.
+- The 6-color framebuffer is 4 bpp **palette-indexed**: `TFT_*` color macros are panel nibbles (WHITE=0x0, GREEN=0x2, RED=0x6, YELLOW=0xB, BLUE=0xD, BLACK=0xF) and `drawPixel` stores `color & 0x0F` directly. RGB565 image data must never be pushed raw (`pushImage` renders garbage); photos are Floyd–Steinberg dithered to the 6-color palette and written pixel-by-pixel as nibbles.
 
 **Troubleshooting facts (apply in any task):**
 - If no serial port appears: hold the BOOT button while plugging in USB, then flash; press RESET after.
@@ -355,19 +357,17 @@ git commit -m "Task 3: three demo screens switched by EE02 user buttons"
 
 ---
 
-### Task 4: Milestone 3 — Wi-Fi + HTTP image fetch
+### Task 4: Milestone 3 — Wi-Fi captive-portal provisioning + picsum image fetch
 
 **Files:**
-- Create: `src/secrets.h.example`
-- Create: `src/secrets.h` (git-ignored; real values)
-- Modify: `platformio.ini` (add JPEGDecoder)
+- Modify: `platformio.ini` (add WiFiManager + JPEGDecoder)
 - Modify: `src/main.cpp` (replace entirely)
 
 **Interfaces:**
 - Consumes: `EPaper epaper`, button constants and `pressed()` from Task 3.
-- Produces: `bool connectWifi()`, `bool fetchAndShowImage()` — Task 5 calls both. `secrets.h` macros: `WIFI_SSID`, `WIFI_PASS`, `IMAGE_URL` (all `#define` strings).
+- Produces: `bool connectWifi()` (WiFiManager autoConnect: saved-credentials connect or captive portal), `bool fetchAndShowImage()`, `void showError(const String&)` — Task 5 reuses all three. The forget-wifi-at-boot gesture (refresh held at power-on).
 
-- [ ] **Step 1: Add JPEGDecoder to `platformio.ini`**
+- [ ] **Step 1: Add libraries to `platformio.ini`**
 
 Replace the `lib_deps` block with:
 
@@ -375,39 +375,19 @@ Replace the `lib_deps` block with:
 lib_deps =
     https://github.com/Seeed-Studio/Seeed_GFX.git
     bodmer/JPEGDecoder@^2.0.0
+    tzapu/WiFiManager@^2.0.17
 ```
 
-- [ ] **Step 2: Write `src/secrets.h.example`**
-
-```cpp
-#pragma once
-#define WIFI_SSID "your-2.4ghz-ssid"
-#define WIFI_PASS "your-password"
-// Any URL returning a baseline JPEG sized exactly 1200x1600.
-// e.g. the myframe server: http://<nas-ip>:8080/photo/1200/1600
-#define IMAGE_URL "http://192.168.1.10:8080/photo/1200/1600"
-```
-
-- [ ] **Step 3: Create `src/secrets.h`**
-
-Copy the example and fill in real values (ask the user for SSID/password/NAS IP if not on hand — do not invent them):
-
-```bash
-cp src/secrets.h.example src/secrets.h
-# then edit src/secrets.h with real values
-```
-
-Confirm it is ignored: `git status` must NOT list `src/secrets.h`.
-
-- [ ] **Step 4: Replace `src/main.cpp`**
+- [ ] **Step 2: Replace `src/main.cpp`**
 
 ```cpp
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <JPEGDecoder.h>
-#include "secrets.h"
 
 EPaper epaper;
 
@@ -415,6 +395,16 @@ constexpr uint8_t BTN_PREV = 2;
 constexpr uint8_t BTN_REFRESH = 3;
 constexpr uint8_t BTN_NEXT = 5;
 constexpr uint8_t LED_PIN = 21; // active-LOW
+
+const char *AP_NAME = "EE02-Setup";
+
+// picsum serves progressive JPEGs, which embedded decoders can't parse;
+// images.weserv.nl re-encodes to baseline. The random= value defeats
+// weserv's cache so every fetch is a different picture.
+String imageUrl() {
+    return "https://images.weserv.nl/?url=picsum.photos/1200/1600"
+           "%3Frandom%3D" + String(esp_random()) + "&output=jpg";
+}
 
 void showError(const String &msg) {
     epaper.fillScreen(TFT_WHITE);
@@ -425,48 +415,179 @@ void showError(const String &msg) {
     epaper.update();
 }
 
-bool connectWifi() {
-    Serial.printf("connecting to %s", WIFI_SSID);
-    WiFi.mode(WIFI_STA);
-    for (int attempt = 0; attempt < 3; attempt++) {
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
-        uint32_t start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-            delay(500);
-            Serial.print(".");
-        }
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("\nconnected, IP %s, RSSI %d dBm\n",
-                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
-            return true;
-        }
-        Serial.printf("\nattempt %d failed, retrying\n", attempt + 1);
-        WiFi.disconnect(true);
-        delay(1000);
-    }
-    return false;
+void showProvisioningScreen() {
+    epaper.fillScreen(TFT_WHITE);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString("Wi-Fi setup", 20, 40, 4);
+    epaper.drawString("1. On your phone, join the Wi-Fi network:", 20, 160, 4);
+    epaper.setTextColor(TFT_BLUE, TFT_WHITE);
+    epaper.drawString(AP_NAME, 60, 220, 4);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString("2. Open http://192.168.4.1 in a browser", 20, 300, 4);
+    epaper.drawString("3. Pick your 2.4 GHz network, enter its password", 20, 360, 4);
+    epaper.drawString("The board remembers it for future boots.", 20, 480, 4);
+    epaper.drawString("Hold the refresh button at power-on to forget.", 20, 540, 4);
+    epaper.update();
 }
 
-// Decode the JPEG in buf and push it MCU block by MCU block.
-// Image must be exactly 1200x1600 so blocks tile without clipping.
-void renderJpeg(uint8_t *buf, size_t len) {
-    JpegDec.decodeArray(buf, len);
-    Serial.printf("jpeg: %d x %d, MCU %d x %d\n", JpegDec.width,
-                  JpegDec.height, JpegDec.MCUWidth, JpegDec.MCUHeight);
-    while (JpegDec.read()) {
-        int x = JpegDec.MCUx * JpegDec.MCUWidth;
-        int y = JpegDec.MCUy * JpegDec.MCUHeight;
-        epaper.pushImage(x, y, JpegDec.MCUWidth, JpegDec.MCUHeight,
-                         JpegDec.pImage);
+bool provisioningScreenShown = false;
+
+void showProvisioningScreenOnce() {
+    if (provisioningScreenShown) return;
+    provisioningScreenShown = true;
+    Serial.println("drawing provisioning instructions (takes ~20-30 s)...");
+    showProvisioningScreen();
+    Serial.println("instructions on panel");
+}
+
+void configModeCallback(WiFiManager *wm) {
+    Serial.printf("config portal up: join \"%s\", then open http://%s\n",
+                  AP_NAME, WiFi.softAPIP().toString().c_str());
+    // Fallback draw (saved credentials went stale, so the pre-draw in
+    // connectWifi() was skipped). This callback fires before the portal
+    // web server starts, so the ~30 s draw delays the portal — accepted:
+    // the user can't follow instructions they haven't seen yet, and by
+    // the time the panel shows them the portal is up.
+    showProvisioningScreenOnce();
+}
+
+// Connect with saved credentials, or open the captive portal on first
+// boot / after forget. Blocks until connected or portal timeout.
+bool connectWifi() {
+    provisioningScreenShown = false; // each attempt may open a fresh portal
+    WiFiManager wm;
+    wm.setAPCallback(configModeCallback);
+    wm.setConfigPortalTimeout(300);
+    // No saved credentials means the portal WILL open: draw the instructions
+    // now, before autoConnect(), so the portal web server isn't blocked
+    // behind the ~30 s panel draw when the user tries to reach it.
+    if (!wm.getWiFiIsSaved()) showProvisioningScreenOnce();
+    Serial.println("connecting (saved credentials, or captive portal)...");
+    bool ok = wm.autoConnect(AP_NAME);
+    if (ok) {
+        Serial.printf("connected to %s, IP %s, RSSI %d dBm\n",
+                      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                      WiFi.RSSI());
+    } else {
+        Serial.println("provisioning timed out");
     }
+    return ok;
+}
+
+// Spectra 6 palette: panel nibble index (drawPixel stores it directly at
+// 4 bpp) + sRGB approximation used as the dithering target.
+struct PaletteEntry { uint8_t idx; int16_t r, g, b; };
+const PaletteEntry PALETTE[6] = {
+    {0x0, 255, 255, 255}, // white
+    {0xF, 0,   0,   0  }, // black
+    {0x6, 255, 0,   0  }, // red
+    {0xB, 255, 255, 0  }, // yellow
+    {0x2, 0,   255, 0  }, // green
+    {0xD, 0,   0,   255}, // blue
+};
+
+// Floyd-Steinberg dither the RGB565 frame down to the 6 panel colors.
+// Raw RGB565 must never be pushed: at 4 bpp the sprite stores
+// color & 0x0F, i.e. it expects palette nibbles, not RGB values.
+bool ditherToPanel(const uint16_t *fb, int w, int h) {
+    Serial.println("dithering to 6-color palette...");
+    const int stride = (w + 2) * 3; // per-channel error, 1-px guard each side
+    int16_t *errs = (int16_t *)calloc(2 * stride, sizeof(int16_t));
+    if (!errs) {
+        Serial.println("dither buffer alloc failed");
+        return false;
+    }
+    int16_t *cur = errs, *next = errs + stride;
+    for (int y = 0; y < h; y++) {
+        memset(next, 0, stride * sizeof(int16_t));
+        for (int x = 0; x < w; x++) {
+            uint16_t c = fb[(size_t)y * w + x];
+            int r = (c >> 8) & 0xF8; r |= r >> 5;
+            int g = (c >> 3) & 0xFC; g |= g >> 6;
+            int b = (c << 3) & 0xF8; b |= b >> 5;
+            const int e = (x + 1) * 3;
+            r += cur[e];     if (r < 0) r = 0; if (r > 255) r = 255;
+            g += cur[e + 1]; if (g < 0) g = 0; if (g > 255) g = 255;
+            b += cur[e + 2]; if (b < 0) b = 0; if (b > 255) b = 255;
+            int best = 0;
+            int32_t bestD = INT32_MAX;
+            for (int i = 0; i < 6; i++) {
+                int32_t dr = r - PALETTE[i].r;
+                int32_t dg = g - PALETTE[i].g;
+                int32_t db = b - PALETTE[i].b;
+                int32_t d = dr * dr + dg * dg + db * db;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            epaper.drawPixel(x, y, PALETTE[best].idx);
+            int er = r - PALETTE[best].r;
+            int eg = g - PALETTE[best].g;
+            int eb = b - PALETTE[best].b;
+            cur[e + 3]  += er * 7 / 16;
+            cur[e + 4]  += eg * 7 / 16;
+            cur[e + 5]  += eb * 7 / 16;
+            next[e - 3] += er * 3 / 16;
+            next[e - 2] += eg * 3 / 16;
+            next[e - 1] += eb * 3 / 16;
+            next[e]     += er * 5 / 16;
+            next[e + 1] += eg * 5 / 16;
+            next[e + 2] += eb * 5 / 16;
+            next[e + 3] += er / 16;
+            next[e + 4] += eg / 16;
+            next[e + 5] += eb / 16;
+        }
+        int16_t *tmp = cur; cur = next; next = tmp;
+    }
+    free(errs);
+    Serial.println("dithering done");
+    return true;
+}
+
+// Decode the JPEG into a full RGB565 frame in PSRAM, then dither it to
+// the panel. Returns false if the JPEG doesn't decode to sane dimensions.
+bool renderJpeg(uint8_t *buf, size_t len) {
+    JpegDec.decodeArray(buf, len);
+    const int w = JpegDec.width, h = JpegDec.height;
+    Serial.printf("jpeg: %d x %d, MCU %d x %d\n", w, h,
+                  JpegDec.MCUWidth, JpegDec.MCUHeight);
+    if (w <= 0 || h <= 0 || w > epaper.width() || h > epaper.height()) {
+        JpegDec.abort();
+        Serial.println("bad jpeg dimensions");
+        return false;
+    }
+    uint16_t *fb = (uint16_t *)ps_malloc((size_t)w * h * sizeof(uint16_t));
+    if (!fb) {
+        JpegDec.abort();
+        Serial.println("PSRAM alloc for frame failed");
+        return false;
+    }
+    while (JpegDec.read()) {
+        const int mx = JpegDec.MCUx * JpegDec.MCUWidth;
+        const int my = JpegDec.MCUy * JpegDec.MCUHeight;
+        const uint16_t *p = JpegDec.pImage;
+        for (int row = 0; row < JpegDec.MCUHeight; row++) {
+            if (my + row >= h) break;
+            for (int col = 0; col < JpegDec.MCUWidth; col++) {
+                if (mx + col >= w) continue;
+                fb[(size_t)(my + row) * w + (mx + col)] =
+                    p[row * JpegDec.MCUWidth + col];
+            }
+        }
+    }
+    bool ok = ditherToPanel(fb, w, h);
+    free(fb);
+    return ok;
 }
 
 bool fetchAndShowImage() {
     digitalWrite(LED_PIN, LOW);
+    WiFiClientSecure client;
+    client.setInsecure(); // learning repo: skip cert validation
     HTTPClient http;
-    http.begin(IMAGE_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    String url = imageUrl();
+    http.begin(client, url);
     http.setTimeout(20000);
-    Serial.printf("GET %s\n", IMAGE_URL);
+    Serial.printf("GET %s\n", url.c_str());
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
         Serial.printf("HTTP error: %d\n", code);
@@ -512,8 +633,13 @@ bool fetchAndShowImage() {
     }
 
     epaper.fillScreen(TFT_WHITE);
-    renderJpeg(buf, got);
+    bool rendered = renderJpeg(buf, got);
     free(buf);
+    if (!rendered) {
+        showError("jpeg decode failed");
+        digitalWrite(LED_PIN, HIGH);
+        return false;
+    }
     Serial.println("updating panel (takes ~20-30 s)...");
     epaper.update();
     Serial.println("done — press refresh (GPIO3) for a new image");
@@ -535,9 +661,9 @@ bool pressed(uint8_t pin) {
 void setup() {
     Serial.begin(115200);
     delay(2000);
-    Serial.println("ee02-playground: task 4 — wifi image fetch");
+    Serial.println("ee02-playground: task 4 — wifi provisioning + picsum fetch");
 
-    pinMode(BTN_PREV, INPUT);
+    pinMode(BTN_PREV, INPUT);    // external pull-ups on board
     pinMode(BTN_REFRESH, INPUT);
     pinMode(BTN_NEXT, INPUT);
     pinMode(LED_PIN, OUTPUT);
@@ -545,8 +671,14 @@ void setup() {
 
     epaper.begin();
 
+    if (digitalRead(BTN_REFRESH) == LOW) {
+        Serial.println("refresh held at boot — forgetting saved wifi");
+        WiFiManager wm;
+        wm.resetSettings();
+    }
+
     if (!connectWifi()) {
-        showError("wifi connect failed: " + String(WIFI_SSID));
+        showError("wifi setup failed or timed out");
         return;
     }
     fetchAndShowImage();
@@ -555,7 +687,7 @@ void setup() {
 void loop() {
     if (pressed(BTN_REFRESH)) {
         if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
-            showError("wifi connect failed: " + String(WIFI_SSID));
+            showError("wifi reconnect failed");
             return;
         }
         fetchAndShowImage();
@@ -564,29 +696,31 @@ void loop() {
 }
 ```
 
-- [ ] **Step 5: Build**
+- [ ] **Step 3: Build**
 
 ```bash
 pio run
 ```
 
-Expected: `SUCCESS` (JPEGDecoder downloads on first build).
+Expected: `SUCCESS` (WiFiManager and JPEGDecoder download on first build).
 
-- [ ] **Step 6: Flash and observe**
-
-Precondition: the image URL must serve a baseline JPEG at exactly 1200×1600 (myframe's `/photo/1200/1600` does).
+- [ ] **Step 4: Flash and observe first-boot provisioning**
 
 ```bash
 pio run -t upload && pio device monitor
 ```
 
-Expected serial: `connected, IP …`, `GET …`, `content-length: …`, `jpeg: 1200 x 1600 …`, `updating panel…`; the fetched photo appears on the panel (six-color dithered — colors will look posterized, that's the medium, not a bug). Pressing **refresh** fetches a different image.
+Expected serial (no credentials saved yet): `connecting (saved credentials, or captive portal)...` then `config portal up: join "EE02-Setup", then open http://192.168.4.1` and `instructions on panel`; the panel shows the setup instructions.
 
-- [ ] **Step 7: Commit**
+**User steps (cannot be automated):** join `EE02-Setup` from a phone, open `http://192.168.4.1`, pick the home network from the scan list (signal strengths shown), enter the password. Then expected serial: `connected to <ssid>, IP …`, `GET https://images.weserv.nl/…`, `content-length: …`, `jpeg: 1200 x 1600 …`, `updating panel…`; a random photo appears (six-color dithered — posterized colors are the medium, not a bug). Pressing **refresh** fetches a different image. Power-cycling the board must reconnect without the portal.
+
+Note: picsum direct URLs serve progressive JPEGs (JPEGDecoder decodes them as 0×0 — observed on hardware 2026-07-08), which is why the URL goes through images.weserv.nl for baseline re-encode. If serial ever shows `jpeg: 0 x 0` again, the proxy output changed — re-verify with `curl -sL '<url>' -o x.jpg && file x.jpg` (must say `baseline`).
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add platformio.ini src/secrets.h.example src/main.cpp
-git commit -m "Task 4: fetch JPEG over wifi and render on panel"
+git add platformio.ini src/main.cpp
+git commit -m "Task 4: WiFiManager captive-portal provisioning + picsum JPEG fetch"
 ```
 
 ---
@@ -597,8 +731,8 @@ git commit -m "Task 4: fetch JPEG over wifi and render on panel"
 - Modify: `src/main.cpp` (replace entirely)
 
 **Interfaces:**
-- Consumes: `connectWifi()`, `fetchAndShowImage()` pattern, button/pin constants from Task 4.
-- Produces: final firmware shape: boot → fetch → overlay status footer → deep sleep (timer + any-button wake). `float readBatteryVoltage()` and RTC-persistent `bootCount`.
+- Consumes: `connectWifi()` (WiFiManager), `fetchAndShowImage()` pattern, `showError()`, button/pin constants from Task 4.
+- Produces: final firmware shape: boot → (optional forget-wifi) → connect → fetch → overlay status footer → deep sleep (timer + any-button wake). `float readBatteryVoltage()` and RTC-persistent `bootCount`.
 
 - [ ] **Step 1: Replace `src/main.cpp`**
 
@@ -606,9 +740,10 @@ git commit -m "Task 4: fetch JPEG over wifi and render on panel"
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <JPEGDecoder.h>
-#include "secrets.h"
 
 EPaper epaper;
 
@@ -622,6 +757,16 @@ constexpr uint8_t BATTERY_ADC_PIN = 1;   // A0, via /2 divider
 constexpr uint8_t BATTERY_EN_PIN = 6;    // HIGH enables the divider
 constexpr uint8_t EPAPER_EN_PIN = 43;    // panel power enable
 constexpr uint64_t SLEEP_SECONDS = 60 * 60; // 1 hour
+
+const char *AP_NAME = "EE02-Setup";
+
+// picsum serves progressive JPEGs, which embedded decoders can't parse;
+// images.weserv.nl re-encodes to baseline. The random= value defeats
+// weserv's cache so every fetch is a different picture.
+String imageUrl() {
+    return "https://images.weserv.nl/?url=picsum.photos/1200/1600"
+           "%3Frandom%3D" + String(esp_random()) + "&output=jpg";
+}
 
 RTC_DATA_ATTR uint32_t bootCount = 0;
 
@@ -657,48 +802,179 @@ void showError(const String &msg) {
     epaper.update();
 }
 
-bool connectWifi() {
-    Serial.printf("connecting to %s", WIFI_SSID);
-    WiFi.mode(WIFI_STA);
-    for (int attempt = 0; attempt < 3; attempt++) {
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
-        uint32_t start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-            delay(500);
-            Serial.print(".");
-        }
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("\nconnected, IP %s, RSSI %d dBm\n",
-                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
-            return true;
-        }
-        Serial.printf("\nattempt %d failed, retrying\n", attempt + 1);
-        WiFi.disconnect(true);
-        delay(1000);
-    }
-    return false;
+void showProvisioningScreen() {
+    epaper.fillScreen(TFT_WHITE);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString("Wi-Fi setup", 20, 40, 4);
+    epaper.drawString("1. On your phone, join the Wi-Fi network:", 20, 160, 4);
+    epaper.setTextColor(TFT_BLUE, TFT_WHITE);
+    epaper.drawString(AP_NAME, 60, 220, 4);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString("2. Open http://192.168.4.1 in a browser", 20, 300, 4);
+    epaper.drawString("3. Pick your 2.4 GHz network, enter its password", 20, 360, 4);
+    epaper.drawString("The board remembers it for future boots.", 20, 480, 4);
+    epaper.drawString("Hold the refresh button at power-on to forget.", 20, 540, 4);
+    epaper.update();
 }
 
-void renderJpeg(uint8_t *buf, size_t len) {
-    JpegDec.decodeArray(buf, len);
-    Serial.printf("jpeg: %d x %d, MCU %d x %d\n", JpegDec.width,
-                  JpegDec.height, JpegDec.MCUWidth, JpegDec.MCUHeight);
-    while (JpegDec.read()) {
-        int x = JpegDec.MCUx * JpegDec.MCUWidth;
-        int y = JpegDec.MCUy * JpegDec.MCUHeight;
-        epaper.pushImage(x, y, JpegDec.MCUWidth, JpegDec.MCUHeight,
-                         JpegDec.pImage);
+bool provisioningScreenShown = false;
+
+void showProvisioningScreenOnce() {
+    if (provisioningScreenShown) return;
+    provisioningScreenShown = true;
+    Serial.println("drawing provisioning instructions (takes ~20-30 s)...");
+    showProvisioningScreen();
+    Serial.println("instructions on panel");
+}
+
+void configModeCallback(WiFiManager *wm) {
+    Serial.printf("config portal up: join \"%s\", then open http://%s\n",
+                  AP_NAME, WiFi.softAPIP().toString().c_str());
+    // Fallback draw (saved credentials went stale, so the pre-draw in
+    // connectWifi() was skipped). This callback fires before the portal
+    // web server starts, so the ~30 s draw delays the portal — accepted:
+    // the user can't follow instructions they haven't seen yet, and by
+    // the time the panel shows them the portal is up.
+    showProvisioningScreenOnce();
+}
+
+bool connectWifi() {
+    provisioningScreenShown = false; // each attempt may open a fresh portal
+    WiFiManager wm;
+    wm.setAPCallback(configModeCallback);
+    wm.setConfigPortalTimeout(300);
+    // No saved credentials means the portal WILL open: draw the instructions
+    // now, before autoConnect(), so the portal web server isn't blocked
+    // behind the ~30 s panel draw when the user tries to reach it.
+    if (!wm.getWiFiIsSaved()) showProvisioningScreenOnce();
+    Serial.println("connecting (saved credentials, or captive portal)...");
+    bool ok = wm.autoConnect(AP_NAME);
+    if (ok) {
+        Serial.printf("connected to %s, IP %s, RSSI %d dBm\n",
+                      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                      WiFi.RSSI());
+    } else {
+        Serial.println("provisioning timed out");
     }
+    return ok;
+}
+
+// Spectra 6 palette: panel nibble index (drawPixel stores it directly at
+// 4 bpp) + sRGB approximation used as the dithering target.
+struct PaletteEntry { uint8_t idx; int16_t r, g, b; };
+const PaletteEntry PALETTE[6] = {
+    {0x0, 255, 255, 255}, // white
+    {0xF, 0,   0,   0  }, // black
+    {0x6, 255, 0,   0  }, // red
+    {0xB, 255, 255, 0  }, // yellow
+    {0x2, 0,   255, 0  }, // green
+    {0xD, 0,   0,   255}, // blue
+};
+
+// Floyd-Steinberg dither the RGB565 frame down to the 6 panel colors.
+// Raw RGB565 must never be pushed: at 4 bpp the sprite stores
+// color & 0x0F, i.e. it expects palette nibbles, not RGB values.
+bool ditherToPanel(const uint16_t *fb, int w, int h) {
+    Serial.println("dithering to 6-color palette...");
+    const int stride = (w + 2) * 3; // per-channel error, 1-px guard each side
+    int16_t *errs = (int16_t *)calloc(2 * stride, sizeof(int16_t));
+    if (!errs) {
+        Serial.println("dither buffer alloc failed");
+        return false;
+    }
+    int16_t *cur = errs, *next = errs + stride;
+    for (int y = 0; y < h; y++) {
+        memset(next, 0, stride * sizeof(int16_t));
+        for (int x = 0; x < w; x++) {
+            uint16_t c = fb[(size_t)y * w + x];
+            int r = (c >> 8) & 0xF8; r |= r >> 5;
+            int g = (c >> 3) & 0xFC; g |= g >> 6;
+            int b = (c << 3) & 0xF8; b |= b >> 5;
+            const int e = (x + 1) * 3;
+            r += cur[e];     if (r < 0) r = 0; if (r > 255) r = 255;
+            g += cur[e + 1]; if (g < 0) g = 0; if (g > 255) g = 255;
+            b += cur[e + 2]; if (b < 0) b = 0; if (b > 255) b = 255;
+            int best = 0;
+            int32_t bestD = INT32_MAX;
+            for (int i = 0; i < 6; i++) {
+                int32_t dr = r - PALETTE[i].r;
+                int32_t dg = g - PALETTE[i].g;
+                int32_t db = b - PALETTE[i].b;
+                int32_t d = dr * dr + dg * dg + db * db;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            epaper.drawPixel(x, y, PALETTE[best].idx);
+            int er = r - PALETTE[best].r;
+            int eg = g - PALETTE[best].g;
+            int eb = b - PALETTE[best].b;
+            cur[e + 3]  += er * 7 / 16;
+            cur[e + 4]  += eg * 7 / 16;
+            cur[e + 5]  += eb * 7 / 16;
+            next[e - 3] += er * 3 / 16;
+            next[e - 2] += eg * 3 / 16;
+            next[e - 1] += eb * 3 / 16;
+            next[e]     += er * 5 / 16;
+            next[e + 1] += eg * 5 / 16;
+            next[e + 2] += eb * 5 / 16;
+            next[e + 3] += er / 16;
+            next[e + 4] += eg / 16;
+            next[e + 5] += eb / 16;
+        }
+        int16_t *tmp = cur; cur = next; next = tmp;
+    }
+    free(errs);
+    Serial.println("dithering done");
+    return true;
+}
+
+// Decode the JPEG into a full RGB565 frame in PSRAM, then dither it to
+// the panel. Returns false if the JPEG doesn't decode to sane dimensions.
+bool renderJpeg(uint8_t *buf, size_t len) {
+    JpegDec.decodeArray(buf, len);
+    const int w = JpegDec.width, h = JpegDec.height;
+    Serial.printf("jpeg: %d x %d, MCU %d x %d\n", w, h,
+                  JpegDec.MCUWidth, JpegDec.MCUHeight);
+    if (w <= 0 || h <= 0 || w > epaper.width() || h > epaper.height()) {
+        JpegDec.abort();
+        Serial.println("bad jpeg dimensions");
+        return false;
+    }
+    uint16_t *fb = (uint16_t *)ps_malloc((size_t)w * h * sizeof(uint16_t));
+    if (!fb) {
+        JpegDec.abort();
+        Serial.println("PSRAM alloc for frame failed");
+        return false;
+    }
+    while (JpegDec.read()) {
+        const int mx = JpegDec.MCUx * JpegDec.MCUWidth;
+        const int my = JpegDec.MCUy * JpegDec.MCUHeight;
+        const uint16_t *p = JpegDec.pImage;
+        for (int row = 0; row < JpegDec.MCUHeight; row++) {
+            if (my + row >= h) break;
+            for (int col = 0; col < JpegDec.MCUWidth; col++) {
+                if (mx + col >= w) continue;
+                fb[(size_t)(my + row) * w + (mx + col)] =
+                    p[row * JpegDec.MCUWidth + col];
+            }
+        }
+    }
+    bool ok = ditherToPanel(fb, w, h);
+    free(fb);
+    return ok;
 }
 
 // Fetch the image into the framebuffer (no update() yet — the caller
 // overlays the status footer first). Returns false after drawing an
 // error screen (already updated) on failure.
 bool fetchImage() {
+    WiFiClientSecure client;
+    client.setInsecure();
     HTTPClient http;
-    http.begin(IMAGE_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    String url = imageUrl();
+    http.begin(client, url);
     http.setTimeout(20000);
-    Serial.printf("GET %s\n", IMAGE_URL);
+    Serial.printf("GET %s\n", url.c_str());
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
         http.end();
@@ -736,8 +1012,12 @@ bool fetchImage() {
         return false;
     }
     epaper.fillScreen(TFT_WHITE);
-    renderJpeg(buf, got);
+    bool rendered = renderJpeg(buf, got);
     free(buf);
+    if (!rendered) {
+        showError("jpeg decode failed");
+        return false;
+    }
     return true;
 }
 
@@ -755,6 +1035,11 @@ void goToSleep() {
     epaper.sleep();                    // panel low-power mode
     pinMode(EPAPER_EN_PIN, OUTPUT);    // cut panel power rail
     digitalWrite(EPAPER_EN_PIN, LOW);
+    // Deep sleep floats the pads unless held: latch the enable lines low
+    // so the panel and battery divider stay off while sleeping.
+    gpio_hold_en((gpio_num_t)EPAPER_EN_PIN);
+    gpio_hold_en((gpio_num_t)BATTERY_EN_PIN);
+    gpio_deep_sleep_hold_en();
     esp_sleep_enable_timer_wakeup(SLEEP_SECONDS * 1000000ULL);
     esp_sleep_enable_ext1_wakeup(BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
     esp_deep_sleep_start();
@@ -767,6 +1052,12 @@ void setup() {
     Serial.printf("ee02-playground: task 5 — boot #%u, wake: %s\n",
                   bootCount, wakeReason());
 
+    // Release the pin holds from the previous deep sleep (no-op on first
+    // boot) so the panel and battery divider can be driven again.
+    gpio_hold_dis((gpio_num_t)EPAPER_EN_PIN);
+    gpio_hold_dis((gpio_num_t)BATTERY_EN_PIN);
+
+    pinMode(BTN_REFRESH, INPUT);
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW); // LED on while awake
 
@@ -775,8 +1066,17 @@ void setup() {
 
     epaper.begin();
 
+    // Hold refresh through power-on (still held after the 2 s boot delay)
+    // to forget saved wifi. A short press that merely woke us from deep
+    // sleep is released by now and does NOT trigger this.
+    if (digitalRead(BTN_REFRESH) == LOW) {
+        Serial.println("refresh held at boot — forgetting saved wifi");
+        WiFiManager wm;
+        wm.resetSettings();
+    }
+
     if (!connectWifi()) {
-        showError("wifi connect failed: " + String(WIFI_SSID));
+        showError("wifi setup failed or timed out");
     } else if (fetchImage()) {
         drawStatusFooter(vbat);
         Serial.println("updating panel (takes ~20-30 s)...");
@@ -805,9 +1105,9 @@ Expected: `SUCCESS`.
 pio run -t upload && pio device monitor
 ```
 
-Expected: serial shows `boot #1, wake: power-on/reset`, a plausible battery voltage (≈3.5–4.2 V with a battery, ≈4.3–5 V shown if USB-only powers VBAT rail — record what you see), image renders with a footer line `boot #1  wake: power-on/reset  vbat: …`, then `sleeping 3600 s…` and serial goes quiet (deep sleep drops the USB port — this is expected).
+Expected: serial shows `boot #1, wake: power-on/reset`, a battery voltage line (≈3.5–4.2 V with a battery; USB-only readings may sit higher — record what appears), `connected to <ssid>…` (saved credentials from Task 4 — no portal), image renders with footer `boot #1  wake: power-on/reset  vbat: …`, then `sleeping 3600 s…` and serial goes quiet (deep sleep drops the USB port — expected).
 
-- [ ] **Step 4: Verify button wake**
+- [ ] **Step 4: Verify button wake (user step)**
 
 Press any of the three user buttons. The USB port re-enumerates; re-run `pio device monitor` quickly.
 
@@ -826,6 +1126,6 @@ git commit -m "Task 5: battery reading, status footer, deep sleep with timer+but
 
 - Milestone 1 (hello display) → Task 2
 - Milestone 2 (buttons & LED) → Task 3
-- Milestone 3 (Wi-Fi + fetch, secrets.h, error screens) → Task 4
+- Milestone 3 (Wi-Fi captive-portal provisioning, picsum fetch, error screens) → Task 4
 - Milestone 4 (deep sleep & battery) → Task 5
 - Toolchain/scaffold, PSRAM/flash overrides, checked-in display config (as build flags) → Task 1
