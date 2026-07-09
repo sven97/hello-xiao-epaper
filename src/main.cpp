@@ -11,11 +11,17 @@
 
 EPaper epaper;
 
-constexpr uint8_t BTN_PREV = 2;
-constexpr uint8_t BTN_REFRESH = 3;
-constexpr uint8_t BTN_NEXT = 5;
+// Physical buttons, named as silkscreened on the EE02 (KEY1..KEY3).
+constexpr uint8_t BTN_KEY1 = 2;
+constexpr uint8_t BTN_KEY2 = 3;
+constexpr uint8_t BTN_KEY3 = 5;
+
+// Function assignment — the one place to remap button behavior.
+constexpr uint8_t BTN_FOOTER  = BTN_KEY1; // toggle footer visibility
+constexpr uint8_t BTN_NEW_PIC = BTN_KEY2; // fetch new picture (+ forget-wifi gesture at power-on)
+constexpr uint8_t BTN_PIN     = BTN_KEY3; // pin/freeze current picture
 constexpr uint64_t BUTTON_WAKE_MASK =
-    (1ULL << BTN_PREV) | (1ULL << BTN_REFRESH) | (1ULL << BTN_NEXT);
+    (1ULL << BTN_KEY1) | (1ULL << BTN_KEY2) | (1ULL << BTN_KEY3);
 constexpr uint8_t LED_PIN = 21;          // active-LOW
 constexpr uint8_t BATTERY_ADC_PIN = 1;   // A0, via /2 divider
 constexpr uint8_t BATTERY_EN_PIN = 6;    // HIGH enables the divider
@@ -85,17 +91,17 @@ int batteryPercent(int32_t mv) {
     return 0;
 }
 
-// Possible reasons: "timer" (hourly refresh), "btn-prev"/"btn-refresh"/
-// "btn-next" (which user button ended the sleep), "power-on" (cold start:
+// Possible reasons: "timer" (hourly refresh), "btn-footer"/"btn-new-pic"/
+// "btn-pin" (which function's button ended the sleep), "power-on" (cold start:
 // power switch, USB plug, RESET, or a fresh flash).
 const char *wakeReason() {
     switch (esp_sleep_get_wakeup_cause()) {
         case ESP_SLEEP_WAKEUP_TIMER: return "timer";
         case ESP_SLEEP_WAKEUP_EXT1: {
             uint64_t bits = esp_sleep_get_ext1_wakeup_status();
-            if (bits & (1ULL << BTN_PREV))    return "btn-prev";
-            if (bits & (1ULL << BTN_REFRESH)) return "btn-refresh";
-            if (bits & (1ULL << BTN_NEXT))    return "btn-next";
+            if (bits & (1ULL << BTN_FOOTER))  return "btn-footer";
+            if (bits & (1ULL << BTN_NEW_PIC)) return "btn-new-pic";
+            if (bits & (1ULL << BTN_PIN))     return "btn-pin";
             return "button";
         }
         default: return "power-on";
@@ -149,7 +155,7 @@ void showProvisioningScreen() {
     epaper.drawString("2. Open http://192.168.4.1 in a browser", 20, 300, 4);
     epaper.drawString("3. Pick your 2.4 GHz network, enter its password", 20, 360, 4);
     epaper.drawString("The board remembers it for future boots.", 20, 480, 4);
-    epaper.drawString("Hold the refresh button at power-on to forget.", 20, 540, 4);
+    epaper.drawString("Hold button KEY2 at power-on to forget it.", 20, 540, 4);
     epaper.update();
 }
 
@@ -462,7 +468,7 @@ void blinkLed(int times, int onOffMs = 150) {
 }
 
 // Fetch a new photo, dither it, persist it, and draw it (footer optional).
-// Called both for the "real" fetch wakes (power-on / btn-refresh / timer)
+// Called both for the "real" fetch wakes (power-on / btn-new-pic / timer)
 // and as the fallback when a toggle wake finds no saved frame yet — this
 // is the helper that replaces the plan's illustrative `goto fetch`.
 void doFetchCycle(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
@@ -488,9 +494,9 @@ void setup() {
     digitalWrite(LED_PIN, HIGH);
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
         uint64_t ackBits = esp_sleep_get_ext1_wakeup_status();
-        int n = (ackBits & (1ULL << BTN_REFRESH)) ? 1
-              : (ackBits & (1ULL << BTN_PREV))    ? 2
-              : (ackBits & (1ULL << BTN_NEXT))    ? 3 : 0;
+        int n = (ackBits & (1ULL << BTN_NEW_PIC)) ? 1
+              : (ackBits & (1ULL << BTN_FOOTER))  ? 2
+              : (ackBits & (1ULL << BTN_PIN))     ? 3 : 0;
         blinkLed(n, 80); // fast ack: even 3 blinks finish in ~480 ms
     }
 
@@ -521,7 +527,7 @@ void setup() {
     gpio_hold_dis((gpio_num_t)EPAPER_EN_PIN);
     gpio_hold_dis((gpio_num_t)BATTERY_EN_PIN);
 
-    pinMode(BTN_REFRESH, INPUT);
+    pinMode(BTN_NEW_PIC, INPUT);
     digitalWrite(LED_PIN, LOW); // LED on while awake
 
     int32_t vbatMv = readBatteryMv();
@@ -545,14 +551,14 @@ void setup() {
     // could still be down here — cause gating (not just release timing)
     // keeps this a power-on-only gesture.
     if (cause == ESP_SLEEP_WAKEUP_UNDEFINED &&
-        digitalRead(BTN_REFRESH) == LOW) {
+        digitalRead(BTN_NEW_PIC) == LOW) {
         Serial.println("refresh held at boot — forgetting saved wifi");
         WiFiManager wm;
         wm.resetSettings();
     }
 
-    bool isToggleFooter = btnBits & (1ULL << BTN_PREV);
-    bool isToggleHold   = btnBits & (1ULL << BTN_NEXT);
+    bool isToggleFooter = btnBits & (1ULL << BTN_FOOTER);
+    bool isToggleHold   = btnBits & (1ULL << BTN_PIN);
 
     if (isToggleFooter || isToggleHold) {
         if (isToggleFooter) {
