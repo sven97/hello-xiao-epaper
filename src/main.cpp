@@ -370,24 +370,23 @@ bool syncClock() {
 // batt: 74% (3.91V, +23mV, chg). The charger (BQ24070) works autonomously
 // and its status pins only drive the onboard LEDs, so charging ("chg") is
 // inferred from the voltage rising between wakes.
-//
-// isFetch: this wake downloaded a new picture (so "last" is now, and the
-// live wifi description should be persisted for later non-fetch redraws).
-void drawStatusFooter(int32_t vbatMv, int32_t deltaMv, bool haveDelta,
-                      bool isFetch) {
+
+// Persist what the footer needs on non-fetch wakes. Must run on EVERY
+// successful fetch, whether or not the footer is drawn — otherwise a
+// hidden-footer fetch leaves stale metadata for the next footer-on redraw.
+void recordFetchMetadata() {
+    prefs.putULong("lastEpoch", (uint32_t)time(nullptr));
+    prefs.putString("wifiDesc",
+                    WiFi.SSID() + " " + String(WiFi.RSSI()) + "dBm");
+}
+
+void drawStatusFooter(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
     String status = "wake: " + String(wakeReason()) + "  |  ";
 
-    time_t lastEpoch;
-    String wifiDesc;
-    if (isFetch) {
-        lastEpoch = time(nullptr);
-        wifiDesc = WiFi.SSID() + " " + String(WiFi.RSSI()) + "dBm";
-        prefs.putULong("lastEpoch", (uint32_t)lastEpoch);
-        prefs.putString("wifiDesc", wifiDesc);
-    } else {
-        lastEpoch = (time_t)prefs.getULong("lastEpoch", 0);
-        wifiDesc = prefs.getString("wifiDesc", "?");
-    }
+    // Metadata is recorded by recordFetchMetadata() on EVERY successful
+    // fetch (footer visible or not); the footer only ever reads it.
+    time_t lastEpoch = (time_t)prefs.getULong("lastEpoch", 0);
+    String wifiDesc = prefs.getString("wifiDesc", "?");
 
     if (lastEpoch > 1600000000) { // sanity: clock was ever synced
         struct tm lastTm;
@@ -453,12 +452,12 @@ void quickSleep() {
     esp_deep_sleep_start();
 }
 
-void blinkLed(int times) {
+void blinkLed(int times, int onOffMs = 150) {
     for (int i = 0; i < times; i++) {
         digitalWrite(LED_PIN, LOW);
-        delay(150);
+        delay(onOffMs);
         digitalWrite(LED_PIN, HIGH);
-        delay(150);
+        delay(onOffMs);
     }
 }
 
@@ -472,8 +471,9 @@ void doFetchCycle(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
     } else if (fetchImage()) {
         syncClock();
         saveFrame();
+        recordFetchMetadata();
         if (footerVisible)
-            drawStatusFooter(vbatMv, deltaMv, haveDelta, true);
+            drawStatusFooter(vbatMv, deltaMv, haveDelta);
         Serial.println("updating panel (takes ~20-30 s)...");
         epaper.update();
         Serial.println("done");
@@ -491,7 +491,7 @@ void setup() {
         int n = (ackBits & (1ULL << BTN_REFRESH)) ? 1
               : (ackBits & (1ULL << BTN_PREV))    ? 2
               : (ackBits & (1ULL << BTN_NEXT))    ? 3 : 0;
-        blinkLed(n);
+        blinkLed(n, 80); // fast ack: even 3 blinks finish in ~480 ms
     }
 
     Serial.begin(115200);
@@ -568,7 +568,7 @@ void setup() {
         bool needRedraw = isToggleFooter || footerVisible;
         if (needRedraw && loadFrame()) {
             if (footerVisible)
-                drawStatusFooter(vbatMv, deltaMv, haveDelta, false);
+                drawStatusFooter(vbatMv, deltaMv, haveDelta);
             Serial.println("updating panel (takes ~20-30 s)...");
             epaper.update();
             Serial.println("done");
