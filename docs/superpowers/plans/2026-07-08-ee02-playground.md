@@ -25,6 +25,7 @@
 - No credentials in the repo: Wi-Fi provisioning happens on-device via the WiFiManager captive portal (AP `EE02-Setup`, portal at `http://192.168.4.1`, network list with signal strength); credentials persist in NVS across boots and deep sleep. Holding the refresh button (GPIO3) at power-on clears them.
 - Image source: random picsum.photos picture at exactly panel size, fetched through the images.weserv.nl proxy which re-encodes to **baseline** JPEG (`https://images.weserv.nl/?url=picsum.photos/1200/1600%3Frandom%3D<n>&output=jpg` with a random `<n>` per fetch to defeat the proxy cache). Direct picsum URLs serve *progressive* JPEGs, which embedded decoders (JPEGDecoder et al.) cannot parse — verified 2026-07-08. HTTPS via `WiFiClientSecure` with `setInsecure()` (no cert validation in a learning repo); redirects followed.
 - No unit-test scaffolding. The test cycle per task is: build → flash → observe on panel/serial → commit.
+- The 6-color framebuffer is 4 bpp **palette-indexed**: `TFT_*` color macros are panel nibbles (WHITE=0x0, GREEN=0x2, RED=0x6, YELLOW=0xB, BLUE=0xD, BLACK=0xF) and `drawPixel` stores `color & 0x0F` directly. RGB565 image data must never be pushed raw (`pushImage` renders garbage); photos are Floyd–Steinberg dithered to the 6-color palette and written pixel-by-pixel as nibbles.
 
 **Troubleshooting facts (apply in any task):**
 - If no serial port appears: hold the BOOT button while plugging in USB, then flash; press RESET after.
@@ -471,18 +472,107 @@ bool connectWifi() {
     return ok;
 }
 
-// Decode the JPEG in buf and push it MCU block by MCU block.
-// Image is exactly 1200x1600 so blocks tile without clipping.
-void renderJpeg(uint8_t *buf, size_t len) {
-    JpegDec.decodeArray(buf, len);
-    Serial.printf("jpeg: %d x %d, MCU %d x %d\n", JpegDec.width,
-                  JpegDec.height, JpegDec.MCUWidth, JpegDec.MCUHeight);
-    while (JpegDec.read()) {
-        int x = JpegDec.MCUx * JpegDec.MCUWidth;
-        int y = JpegDec.MCUy * JpegDec.MCUHeight;
-        epaper.pushImage(x, y, JpegDec.MCUWidth, JpegDec.MCUHeight,
-                         JpegDec.pImage);
+// Spectra 6 palette: panel nibble index (drawPixel stores it directly at
+// 4 bpp) + sRGB approximation used as the dithering target.
+struct PaletteEntry { uint8_t idx; int16_t r, g, b; };
+const PaletteEntry PALETTE[6] = {
+    {0x0, 255, 255, 255}, // white
+    {0xF, 0,   0,   0  }, // black
+    {0x6, 255, 0,   0  }, // red
+    {0xB, 255, 255, 0  }, // yellow
+    {0x2, 0,   255, 0  }, // green
+    {0xD, 0,   0,   255}, // blue
+};
+
+// Floyd-Steinberg dither the RGB565 frame down to the 6 panel colors.
+// Raw RGB565 must never be pushed: at 4 bpp the sprite stores
+// color & 0x0F, i.e. it expects palette nibbles, not RGB values.
+void ditherToPanel(const uint16_t *fb, int w, int h) {
+    Serial.println("dithering to 6-color palette...");
+    const int stride = (w + 2) * 3; // per-channel error, 1-px guard each side
+    int16_t *errs = (int16_t *)calloc(2 * stride, sizeof(int16_t));
+    if (!errs) {
+        Serial.println("dither buffer alloc failed");
+        return;
     }
+    int16_t *cur = errs, *next = errs + stride;
+    for (int y = 0; y < h; y++) {
+        memset(next, 0, stride * sizeof(int16_t));
+        for (int x = 0; x < w; x++) {
+            uint16_t c = fb[(size_t)y * w + x];
+            int r = (c >> 8) & 0xF8; r |= r >> 5;
+            int g = (c >> 3) & 0xFC; g |= g >> 6;
+            int b = (c << 3) & 0xF8; b |= b >> 5;
+            const int e = (x + 1) * 3;
+            r += cur[e];     if (r < 0) r = 0; if (r > 255) r = 255;
+            g += cur[e + 1]; if (g < 0) g = 0; if (g > 255) g = 255;
+            b += cur[e + 2]; if (b < 0) b = 0; if (b > 255) b = 255;
+            int best = 0;
+            int32_t bestD = INT32_MAX;
+            for (int i = 0; i < 6; i++) {
+                int32_t dr = r - PALETTE[i].r;
+                int32_t dg = g - PALETTE[i].g;
+                int32_t db = b - PALETTE[i].b;
+                int32_t d = dr * dr + dg * dg + db * db;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            epaper.drawPixel(x, y, PALETTE[best].idx);
+            int er = r - PALETTE[best].r;
+            int eg = g - PALETTE[best].g;
+            int eb = b - PALETTE[best].b;
+            cur[e + 3]  += er * 7 / 16;
+            cur[e + 4]  += eg * 7 / 16;
+            cur[e + 5]  += eb * 7 / 16;
+            next[e - 3] += er * 3 / 16;
+            next[e - 2] += eg * 3 / 16;
+            next[e - 1] += eb * 3 / 16;
+            next[e]     += er * 5 / 16;
+            next[e + 1] += eg * 5 / 16;
+            next[e + 2] += eb * 5 / 16;
+            next[e + 3] += er / 16;
+            next[e + 4] += eg / 16;
+            next[e + 5] += eb / 16;
+        }
+        int16_t *tmp = cur; cur = next; next = tmp;
+    }
+    free(errs);
+    Serial.println("dithering done");
+}
+
+// Decode the JPEG into a full RGB565 frame in PSRAM, then dither it to
+// the panel. Returns false if the JPEG doesn't decode to sane dimensions.
+bool renderJpeg(uint8_t *buf, size_t len) {
+    JpegDec.decodeArray(buf, len);
+    const int w = JpegDec.width, h = JpegDec.height;
+    Serial.printf("jpeg: %d x %d, MCU %d x %d\n", w, h,
+                  JpegDec.MCUWidth, JpegDec.MCUHeight);
+    if (w <= 0 || h <= 0 || w > epaper.width() || h > epaper.height()) {
+        JpegDec.abort();
+        Serial.println("bad jpeg dimensions");
+        return false;
+    }
+    uint16_t *fb = (uint16_t *)ps_malloc((size_t)w * h * sizeof(uint16_t));
+    if (!fb) {
+        JpegDec.abort();
+        Serial.println("PSRAM alloc for frame failed");
+        return false;
+    }
+    while (JpegDec.read()) {
+        const int mx = JpegDec.MCUx * JpegDec.MCUWidth;
+        const int my = JpegDec.MCUy * JpegDec.MCUHeight;
+        const uint16_t *p = JpegDec.pImage;
+        for (int row = 0; row < JpegDec.MCUHeight; row++) {
+            if (my + row >= h) break;
+            for (int col = 0; col < JpegDec.MCUWidth; col++) {
+                if (mx + col >= w) continue;
+                fb[(size_t)(my + row) * w + (mx + col)] =
+                    p[row * JpegDec.MCUWidth + col];
+            }
+        }
+    }
+    ditherToPanel(fb, w, h);
+    free(fb);
+    return true;
 }
 
 bool fetchAndShowImage() {
@@ -540,8 +630,13 @@ bool fetchAndShowImage() {
     }
 
     epaper.fillScreen(TFT_WHITE);
-    renderJpeg(buf, got);
+    bool rendered = renderJpeg(buf, got);
     free(buf);
+    if (!rendered) {
+        showError("jpeg decode failed");
+        digitalWrite(LED_PIN, HIGH);
+        return false;
+    }
     Serial.println("updating panel (takes ~20-30 s)...");
     epaper.update();
     Serial.println("done — press refresh (GPIO3) for a new image");
@@ -759,16 +854,107 @@ bool connectWifi() {
     return ok;
 }
 
-void renderJpeg(uint8_t *buf, size_t len) {
-    JpegDec.decodeArray(buf, len);
-    Serial.printf("jpeg: %d x %d, MCU %d x %d\n", JpegDec.width,
-                  JpegDec.height, JpegDec.MCUWidth, JpegDec.MCUHeight);
-    while (JpegDec.read()) {
-        int x = JpegDec.MCUx * JpegDec.MCUWidth;
-        int y = JpegDec.MCUy * JpegDec.MCUHeight;
-        epaper.pushImage(x, y, JpegDec.MCUWidth, JpegDec.MCUHeight,
-                         JpegDec.pImage);
+// Spectra 6 palette: panel nibble index (drawPixel stores it directly at
+// 4 bpp) + sRGB approximation used as the dithering target.
+struct PaletteEntry { uint8_t idx; int16_t r, g, b; };
+const PaletteEntry PALETTE[6] = {
+    {0x0, 255, 255, 255}, // white
+    {0xF, 0,   0,   0  }, // black
+    {0x6, 255, 0,   0  }, // red
+    {0xB, 255, 255, 0  }, // yellow
+    {0x2, 0,   255, 0  }, // green
+    {0xD, 0,   0,   255}, // blue
+};
+
+// Floyd-Steinberg dither the RGB565 frame down to the 6 panel colors.
+// Raw RGB565 must never be pushed: at 4 bpp the sprite stores
+// color & 0x0F, i.e. it expects palette nibbles, not RGB values.
+void ditherToPanel(const uint16_t *fb, int w, int h) {
+    Serial.println("dithering to 6-color palette...");
+    const int stride = (w + 2) * 3; // per-channel error, 1-px guard each side
+    int16_t *errs = (int16_t *)calloc(2 * stride, sizeof(int16_t));
+    if (!errs) {
+        Serial.println("dither buffer alloc failed");
+        return;
     }
+    int16_t *cur = errs, *next = errs + stride;
+    for (int y = 0; y < h; y++) {
+        memset(next, 0, stride * sizeof(int16_t));
+        for (int x = 0; x < w; x++) {
+            uint16_t c = fb[(size_t)y * w + x];
+            int r = (c >> 8) & 0xF8; r |= r >> 5;
+            int g = (c >> 3) & 0xFC; g |= g >> 6;
+            int b = (c << 3) & 0xF8; b |= b >> 5;
+            const int e = (x + 1) * 3;
+            r += cur[e];     if (r < 0) r = 0; if (r > 255) r = 255;
+            g += cur[e + 1]; if (g < 0) g = 0; if (g > 255) g = 255;
+            b += cur[e + 2]; if (b < 0) b = 0; if (b > 255) b = 255;
+            int best = 0;
+            int32_t bestD = INT32_MAX;
+            for (int i = 0; i < 6; i++) {
+                int32_t dr = r - PALETTE[i].r;
+                int32_t dg = g - PALETTE[i].g;
+                int32_t db = b - PALETTE[i].b;
+                int32_t d = dr * dr + dg * dg + db * db;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            epaper.drawPixel(x, y, PALETTE[best].idx);
+            int er = r - PALETTE[best].r;
+            int eg = g - PALETTE[best].g;
+            int eb = b - PALETTE[best].b;
+            cur[e + 3]  += er * 7 / 16;
+            cur[e + 4]  += eg * 7 / 16;
+            cur[e + 5]  += eb * 7 / 16;
+            next[e - 3] += er * 3 / 16;
+            next[e - 2] += eg * 3 / 16;
+            next[e - 1] += eb * 3 / 16;
+            next[e]     += er * 5 / 16;
+            next[e + 1] += eg * 5 / 16;
+            next[e + 2] += eb * 5 / 16;
+            next[e + 3] += er / 16;
+            next[e + 4] += eg / 16;
+            next[e + 5] += eb / 16;
+        }
+        int16_t *tmp = cur; cur = next; next = tmp;
+    }
+    free(errs);
+    Serial.println("dithering done");
+}
+
+// Decode the JPEG into a full RGB565 frame in PSRAM, then dither it to
+// the panel. Returns false if the JPEG doesn't decode to sane dimensions.
+bool renderJpeg(uint8_t *buf, size_t len) {
+    JpegDec.decodeArray(buf, len);
+    const int w = JpegDec.width, h = JpegDec.height;
+    Serial.printf("jpeg: %d x %d, MCU %d x %d\n", w, h,
+                  JpegDec.MCUWidth, JpegDec.MCUHeight);
+    if (w <= 0 || h <= 0 || w > epaper.width() || h > epaper.height()) {
+        JpegDec.abort();
+        Serial.println("bad jpeg dimensions");
+        return false;
+    }
+    uint16_t *fb = (uint16_t *)ps_malloc((size_t)w * h * sizeof(uint16_t));
+    if (!fb) {
+        JpegDec.abort();
+        Serial.println("PSRAM alloc for frame failed");
+        return false;
+    }
+    while (JpegDec.read()) {
+        const int mx = JpegDec.MCUx * JpegDec.MCUWidth;
+        const int my = JpegDec.MCUy * JpegDec.MCUHeight;
+        const uint16_t *p = JpegDec.pImage;
+        for (int row = 0; row < JpegDec.MCUHeight; row++) {
+            if (my + row >= h) break;
+            for (int col = 0; col < JpegDec.MCUWidth; col++) {
+                if (mx + col >= w) continue;
+                fb[(size_t)(my + row) * w + (mx + col)] =
+                    p[row * JpegDec.MCUWidth + col];
+            }
+        }
+    }
+    ditherToPanel(fb, w, h);
+    free(fb);
+    return true;
 }
 
 // Fetch the image into the framebuffer (no update() yet — the caller
@@ -820,8 +1006,12 @@ bool fetchImage() {
         return false;
     }
     epaper.fillScreen(TFT_WHITE);
-    renderJpeg(buf, got);
+    bool rendered = renderJpeg(buf, got);
     free(buf);
+    if (!rendered) {
+        showError("jpeg decode failed");
+        return false;
+    }
     return true;
 }
 
