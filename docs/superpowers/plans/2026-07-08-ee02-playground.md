@@ -429,12 +429,24 @@ void showProvisioningScreen() {
     epaper.update();
 }
 
-void configModeCallback(WiFiManager *wm) {
-    Serial.printf("config portal up: join \"%s\", then open http://%s\n",
-                  AP_NAME, WiFi.softAPIP().toString().c_str());
+bool provisioningScreenShown = false;
+
+void showProvisioningScreenOnce() {
+    if (provisioningScreenShown) return;
+    provisioningScreenShown = true;
     Serial.println("drawing provisioning instructions (takes ~20-30 s)...");
     showProvisioningScreen();
     Serial.println("instructions on panel");
+}
+
+void configModeCallback(WiFiManager *wm) {
+    Serial.printf("config portal up: join \"%s\", then open http://%s\n",
+                  AP_NAME, WiFi.softAPIP().toString().c_str());
+    // Fallback draw only (e.g. saved credentials went stale): this callback
+    // fires before the portal web server starts, so a ~30 s draw here would
+    // block the portal. The primary path draws before autoConnect() — see
+    // connectWifi().
+    showProvisioningScreenOnce();
 }
 
 // Connect with saved credentials, or open the captive portal on first
@@ -442,7 +454,11 @@ void configModeCallback(WiFiManager *wm) {
 bool connectWifi() {
     WiFiManager wm;
     wm.setAPCallback(configModeCallback);
-    wm.setConfigPortalTimeout(300); // give up after 5 min, don't hang forever
+    wm.setConfigPortalTimeout(300);
+    // No saved credentials means the portal WILL open: draw the instructions
+    // now, before autoConnect(), so the portal web server isn't blocked
+    // behind the ~30 s panel draw when the user tries to reach it.
+    if (!wm.getWiFiIsSaved()) showProvisioningScreenOnce();
     Serial.println("connecting (saved credentials, or captive portal)...");
     bool ok = wm.autoConnect(AP_NAME);
     if (ok) {
@@ -703,18 +719,34 @@ void showProvisioningScreen() {
     epaper.update();
 }
 
-void configModeCallback(WiFiManager *wm) {
-    Serial.printf("config portal up: join \"%s\", then open http://%s\n",
-                  AP_NAME, WiFi.softAPIP().toString().c_str());
+bool provisioningScreenShown = false;
+
+void showProvisioningScreenOnce() {
+    if (provisioningScreenShown) return;
+    provisioningScreenShown = true;
     Serial.println("drawing provisioning instructions (takes ~20-30 s)...");
     showProvisioningScreen();
     Serial.println("instructions on panel");
+}
+
+void configModeCallback(WiFiManager *wm) {
+    Serial.printf("config portal up: join \"%s\", then open http://%s\n",
+                  AP_NAME, WiFi.softAPIP().toString().c_str());
+    // Fallback draw only (e.g. saved credentials went stale): this callback
+    // fires before the portal web server starts, so a ~30 s draw here would
+    // block the portal. The primary path draws before autoConnect() — see
+    // connectWifi().
+    showProvisioningScreenOnce();
 }
 
 bool connectWifi() {
     WiFiManager wm;
     wm.setAPCallback(configModeCallback);
     wm.setConfigPortalTimeout(300);
+    // No saved credentials means the portal WILL open: draw the instructions
+    // now, before autoConnect(), so the portal web server isn't blocked
+    // behind the ~30 s panel draw when the user tries to reach it.
+    if (!wm.getWiFiIsSaved()) showProvisioningScreenOnce();
     Serial.println("connecting (saved credentials, or captive portal)...");
     bool ok = wm.autoConnect(AP_NAME);
     if (ok) {
