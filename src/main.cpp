@@ -11,15 +11,47 @@ EPaper epaper;
 constexpr uint8_t BTN_PREV = 2;
 constexpr uint8_t BTN_REFRESH = 3;
 constexpr uint8_t BTN_NEXT = 5;
-constexpr uint8_t LED_PIN = 21; // active-LOW
+constexpr uint64_t BUTTON_WAKE_MASK =
+    (1ULL << BTN_PREV) | (1ULL << BTN_REFRESH) | (1ULL << BTN_NEXT);
+constexpr uint8_t LED_PIN = 21;          // active-LOW
+constexpr uint8_t BATTERY_ADC_PIN = 1;   // A0, via /2 divider
+constexpr uint8_t BATTERY_EN_PIN = 6;    // HIGH enables the divider
+constexpr uint8_t EPAPER_EN_PIN = 43;    // panel power enable
+constexpr uint64_t SLEEP_SECONDS = 60 * 60; // 1 hour
 
 const char *AP_NAME = "EE02-Setup";
+
 // picsum serves progressive JPEGs, which embedded decoders can't parse;
 // images.weserv.nl re-encodes to baseline. The random= value defeats
 // weserv's cache so every fetch is a different picture.
 String imageUrl() {
     return "https://images.weserv.nl/?url=picsum.photos/1200/1600"
            "%3Frandom%3D" + String(esp_random()) + "&output=jpg";
+}
+
+RTC_DATA_ATTR uint32_t bootCount = 0;
+
+float readBatteryVoltage() {
+    analogReadResolution(12);
+    pinMode(BATTERY_ADC_PIN, INPUT);
+    pinMode(BATTERY_EN_PIN, OUTPUT);
+    digitalWrite(BATTERY_EN_PIN, HIGH);
+    delay(5);
+    uint32_t sum = 0;
+    for (int i = 0; i < 10; i++) {
+        sum += analogRead(BATTERY_ADC_PIN);
+        delay(2);
+    }
+    digitalWrite(BATTERY_EN_PIN, LOW);
+    return (sum / 10 / 4095.0f) * 3.3f * 2.0f; // /2 divider
+}
+
+const char *wakeReason() {
+    switch (esp_sleep_get_wakeup_cause()) {
+        case ESP_SLEEP_WAKEUP_TIMER: return "timer";
+        case ESP_SLEEP_WAKEUP_EXT1:  return "button";
+        default:                     return "power-on/reset";
+    }
 }
 
 void showError(const String &msg) {
@@ -67,13 +99,11 @@ void configModeCallback(WiFiManager *wm) {
     showProvisioningScreenOnce();
 }
 
-// Connect with saved credentials, or open the captive portal on first
-// boot / after forget. Blocks until connected or portal timeout.
 bool connectWifi() {
     provisioningScreenShown = false; // each attempt may open a fresh portal
     WiFiManager wm;
     wm.setAPCallback(configModeCallback);
-    wm.setConfigPortalTimeout(300); // give up after 5 min, don't hang forever
+    wm.setConfigPortalTimeout(300);
     // No saved credentials means the portal WILL open: draw the instructions
     // now, before autoConnect(), so the portal web server isn't blocked
     // behind the ~30 s panel draw when the user tries to reach it.
@@ -193,10 +223,12 @@ bool renderJpeg(uint8_t *buf, size_t len) {
     return true;
 }
 
-bool fetchAndShowImage() {
-    digitalWrite(LED_PIN, LOW);
+// Fetch the image into the framebuffer (no update() yet — the caller
+// overlays the status footer first). Returns false after drawing an
+// error screen (already updated) on failure.
+bool fetchImage() {
     WiFiClientSecure client;
-    client.setInsecure(); // learning repo: skip cert validation
+    client.setInsecure();
     HTTPClient http;
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     String url = imageUrl();
@@ -205,25 +237,20 @@ bool fetchAndShowImage() {
     Serial.printf("GET %s\n", url.c_str());
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
-        Serial.printf("HTTP error: %d\n", code);
         http.end();
         showError("HTTP " + String(code) + " from image server");
-        digitalWrite(LED_PIN, HIGH);
         return false;
     }
     int len = http.getSize();
-    Serial.printf("content-length: %d\n", len);
     if (len <= 0) {
         http.end();
         showError("server sent no Content-Length");
-        digitalWrite(LED_PIN, HIGH);
         return false;
     }
-    uint8_t *buf = (uint8_t *)ps_malloc(len); // PSRAM
+    uint8_t *buf = (uint8_t *)ps_malloc(len);
     if (!buf) {
         http.end();
         showError("PSRAM alloc failed");
-        digitalWrite(LED_PIN, HIGH);
         return false;
     }
     WiFiClient *stream = http.getStreamPtr();
@@ -239,53 +266,59 @@ bool fetchAndShowImage() {
         }
     }
     http.end();
-    Serial.printf("received %u / %d bytes\n", (unsigned)got, len);
     if (got < (size_t)len) {
         free(buf);
         showError("download incomplete");
-        digitalWrite(LED_PIN, HIGH);
         return false;
     }
-
     epaper.fillScreen(TFT_WHITE);
     bool rendered = renderJpeg(buf, got);
     free(buf);
     if (!rendered) {
         showError("jpeg decode failed");
-        digitalWrite(LED_PIN, HIGH);
         return false;
     }
-    Serial.println("updating panel (takes ~20-30 s)...");
-    epaper.update();
-    Serial.println("done — press refresh (GPIO3) for a new image");
-    digitalWrite(LED_PIN, HIGH);
     return true;
 }
 
-bool pressed(uint8_t pin) {
-    if (digitalRead(pin) == LOW) {
-        delay(30);
-        if (digitalRead(pin) == LOW) {
-            while (digitalRead(pin) == LOW) delay(10);
-            return true;
-        }
-    }
-    return false;
+void drawStatusFooter(float vbat) {
+    String status = "boot #" + String(bootCount) + "  wake: " +
+                    wakeReason() + "  vbat: " + String(vbat, 2) + " V";
+    epaper.fillRect(0, 1560, 1200, 40, TFT_WHITE);
+    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
+    epaper.drawString(status, 20, 1568, 2);
+}
+
+void goToSleep() {
+    Serial.printf("sleeping %llu s (buttons also wake)...\n", SLEEP_SECONDS);
+    Serial.flush();
+    epaper.sleep();                    // panel low-power mode
+    pinMode(EPAPER_EN_PIN, OUTPUT);    // cut panel power rail
+    digitalWrite(EPAPER_EN_PIN, LOW);
+    esp_sleep_enable_timer_wakeup(SLEEP_SECONDS * 1000000ULL);
+    esp_sleep_enable_ext1_wakeup(BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+    esp_deep_sleep_start();
 }
 
 void setup() {
     Serial.begin(115200);
     delay(2000);
-    Serial.println("ee02-playground: task 4 — wifi provisioning + picsum fetch");
+    bootCount++;
+    Serial.printf("ee02-playground: task 5 — boot #%u, wake: %s\n",
+                  bootCount, wakeReason());
 
-    pinMode(BTN_PREV, INPUT);    // external pull-ups on board
     pinMode(BTN_REFRESH, INPUT);
-    pinMode(BTN_NEXT, INPUT);
     pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, HIGH);
+    digitalWrite(LED_PIN, LOW); // LED on while awake
+
+    float vbat = readBatteryVoltage();
+    Serial.printf("battery: %.2f V\n", vbat);
 
     epaper.begin();
 
+    // Hold refresh through power-on (still held after the 2 s boot delay)
+    // to forget saved wifi. A short press that merely woke us from deep
+    // sleep is released by now and does NOT trigger this.
     if (digitalRead(BTN_REFRESH) == LOW) {
         Serial.println("refresh held at boot — forgetting saved wifi");
         WiFiManager wm;
@@ -294,18 +327,15 @@ void setup() {
 
     if (!connectWifi()) {
         showError("wifi setup failed or timed out");
-        return;
+    } else if (fetchImage()) {
+        drawStatusFooter(vbat);
+        Serial.println("updating panel (takes ~20-30 s)...");
+        epaper.update();
+        Serial.println("done");
     }
-    fetchAndShowImage();
+
+    digitalWrite(LED_PIN, HIGH);
+    goToSleep(); // never returns
 }
 
-void loop() {
-    if (pressed(BTN_REFRESH)) {
-        if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
-            showError("wifi reconnect failed");
-            return;
-        }
-        fetchAndShowImage();
-    }
-    delay(10);
-}
+void loop() {}
