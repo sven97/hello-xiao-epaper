@@ -17,7 +17,7 @@ constexpr uint8_t BTN_KEY2 = 3;
 constexpr uint8_t BTN_KEY3 = 5;
 
 // Function assignment — the one place to remap button behavior.
-constexpr uint8_t BTN_FOOTER  = BTN_KEY1; // toggle footer visibility
+constexpr uint8_t BTN_INFO    = BTN_KEY1; // toggle full-screen info page
 constexpr uint8_t BTN_NEW_PIC = BTN_KEY2; // fetch new picture (+ forget-wifi gesture at power-on)
 constexpr uint8_t BTN_PIN     = BTN_KEY3; // pin/freeze current picture
 constexpr uint64_t BUTTON_WAKE_MASK =
@@ -36,7 +36,7 @@ const char *FRAME_PATH = "/frame.bin";
 // Native sprite buffer: 1600*1200 px at 4 bpp
 constexpr size_t FRAME_BYTES = 1600UL * 1200UL / 2;
 
-bool footerVisible = true;
+bool infoVisible = false; // full-screen info page vs the photo
 bool held = false;
 
 // picsum serves progressive JPEGs, which embedded decoders can't parse;
@@ -91,7 +91,7 @@ int batteryPercent(int32_t mv) {
     return 0;
 }
 
-// Possible reasons: "timer" (hourly refresh), "btn-footer"/"btn-new-pic"/
+// Possible reasons: "timer" (hourly refresh), "btn-info"/"btn-new-pic"/
 // "btn-pin" (which function's button ended the sleep), "power-on" (cold start:
 // power switch, USB plug, RESET, or a fresh flash).
 const char *wakeReason() {
@@ -99,7 +99,7 @@ const char *wakeReason() {
         case ESP_SLEEP_WAKEUP_TIMER: return "timer";
         case ESP_SLEEP_WAKEUP_EXT1: {
             uint64_t bits = esp_sleep_get_ext1_wakeup_status();
-            if (bits & (1ULL << BTN_FOOTER))  return "btn-footer";
+            if (bits & (1ULL << BTN_INFO))    return "btn-info";
             if (bits & (1ULL << BTN_NEW_PIC)) return "btn-new-pic";
             if (bits & (1ULL << BTN_PIN))     return "btn-pin";
             return "button";
@@ -418,28 +418,27 @@ bool syncClock() {
     return getLocalTime(&now, 10000);
 }
 
-// Footer format (panel font is ASCII-only, so "|" stands in for a middle
-// dot): last: Wed Jul 9 14:32 | next: 15:32 | wifi: <ssid> -38dBm |
-// batt: 74% (3.91V, +23mV, chg). The charger (BQ24070) works autonomously
-// and its status pins only drive the onboard LEDs, so charging ("chg") is
-// inferred from the voltage rising between wakes.
-
-// Persist what the footer needs on non-fetch wakes. Must run on EVERY
-// successful fetch, whether or not the footer is drawn — otherwise a
-// hidden-footer fetch leaves stale metadata for the next footer-on redraw.
+// Persist what the info page needs on non-fetch wakes. Must run on EVERY
+// successful fetch — otherwise the page shows stale data for a photo it
+// doesn't describe.
 void recordFetchMetadata() {
     prefs.putULong("lastEpoch", (uint32_t)time(nullptr));
     prefs.putString("wifiDesc",
                     WiFi.SSID() + " " + String(WiFi.RSSI()) + "dBm");
 }
 
-void drawStatusFooter(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
-    String status = "wake: " + String(wakeReason()) + "  |  ";
-
-    // Metadata is recorded by recordFetchMetadata() on EVERY successful
-    // fetch (footer visible or not); the footer only ever reads it.
+// Full-screen status page — KEY1 toggles between this and the photo.
+// Centered lines, font 4 at 2x (~52 px tall). The charger (BQ24070) works
+// autonomously and its status pins only drive the onboard LEDs, so
+// charging ("chg") is inferred from the voltage rising between wakes.
+void drawInfoScreen(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
+    // Metadata comes from recordFetchMetadata(); this page only reads it.
     time_t lastEpoch = (time_t)prefs.getULong("lastEpoch", 0);
     String wifiDesc = prefs.getString("wifiDesc", "?");
+
+    String lines[5];
+    int n = 0;
+    lines[n++] = "wake: " + String(wakeReason());
 
     if (lastEpoch > 1600000000) { // sanity: clock was ever synced
         struct tm lastTm;
@@ -447,36 +446,46 @@ void drawStatusFooter(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
         char dow[16], hm[8];
         strftime(dow, sizeof(dow), "%a %b", &lastTm);
         strftime(hm, sizeof(hm), "%H:%M", &lastTm);
-        status += "last: " + String(dow) + " " + String(lastTm.tm_mday) +
-                  " " + String(hm);
+        lines[n++] = "last: " + String(dow) + " " + String(lastTm.tm_mday) +
+                     " " + String(hm);
     } else {
-        status += "last: --";
+        lines[n++] = "last: --";
     }
 
     if (held) {
-        status += "  |  next: held";
+        lines[n++] = "next: held";
     } else {
         time_t next = time(nullptr) + (time_t)SLEEP_SECONDS;
         struct tm nextTm;
         localtime_r(&next, &nextTm);
         char hm[8];
         strftime(hm, sizeof(hm), "%H:%M", &nextTm);
-        status += "  |  next: " + String(hm);
+        lines[n++] = "next: " + String(hm);
     }
 
-    status += "  |  wifi: " + wifiDesc;
-    status += "  |  batt: " + String(batteryPercent(vbatMv)) + "% (" +
-              String(vbatMv / 1000.0f, 2) + "V";
+    lines[n++] = "wifi: " + wifiDesc;
+
+    String batt = "batt: " + String(batteryPercent(vbatMv)) + "% (" +
+                  String(vbatMv / 1000.0f, 2) + "V";
     if (haveDelta) {
-        status += ", ";
-        if (deltaMv >= 0) status += "+";
-        status += String(deltaMv) + "mV";
-        if (deltaMv >= 20) status += ", chg";
+        batt += ", ";
+        if (deltaMv >= 0) batt += "+";
+        batt += String(deltaMv) + "mV";
+        if (deltaMv >= 20) batt += ", chg";
     }
-    status += ")";
-    epaper.fillRect(0, 1560, 1200, 40, TFT_WHITE);
+    batt += ")";
+    lines[n++] = batt;
+
+    epaper.fillScreen(TFT_WHITE);
     epaper.setTextColor(TFT_BLACK, TFT_WHITE);
-    epaper.drawString(status, 20, 1568, 2);
+    epaper.setTextDatum(MC_DATUM); // strings centered on their anchor point
+    epaper.setTextSize(2);
+    const int lineH = 100;
+    int y = 800 - ((n - 1) * lineH) / 2; // vertically center the block
+    for (int i = 0; i < n; i++, y += lineH)
+        epaper.drawString(lines[i], 600, y, 4);
+    epaper.setTextSize(1);
+    epaper.setTextDatum(TL_DATUM);
 }
 
 void goToSleep() {
@@ -514,10 +523,9 @@ void blinkLed(int times, int onOffMs = 150) {
     }
 }
 
-// Fetch a new photo, dither it, persist it, and draw it (footer optional).
-// Called both for the "real" fetch wakes (power-on / btn-new-pic / timer)
-// and as the fallback when a toggle wake finds no saved frame yet — this
-// is the helper that replaces the plan's illustrative `goto fetch`.
+// Fetch a new photo, dither it, persist it, and show it full-bleed.
+// Called for the "real" fetch wakes (power-on / btn-new-pic / timer) and
+// as the fallback when a toggle wake finds no saved frame yet.
 void doFetchCycle(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
     if (!connectWifi()) {
         showError("wifi setup failed or timed out");
@@ -525,8 +533,11 @@ void doFetchCycle(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
         syncClock();
         saveFrame();
         recordFetchMetadata();
-        if (footerVisible)
-            drawStatusFooter(vbatMv, deltaMv, haveDelta);
+        // A new photo always shows the photo — leave the info page.
+        if (infoVisible) {
+            infoVisible = false;
+            prefs.putBool("info", false);
+        }
         Serial.println("updating panel (takes ~20-30 s)...");
         epaper.update();
         Serial.println("done");
@@ -536,13 +547,13 @@ void doFetchCycle(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
 void setup() {
     // Instant acknowledgment: blink before anything else so a button press
     // gets feedback in ~0.5 s (the panel itself takes ~30 s to change).
-    // 1 blink = refresh, 2 = footer toggle, 3 = pin/freeze.
+    // 1 blink = new picture, 2 = info page, 3 = pin/freeze.
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, HIGH);
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
         uint64_t ackBits = esp_sleep_get_ext1_wakeup_status();
         int n = (ackBits & (1ULL << BTN_NEW_PIC)) ? 1
-              : (ackBits & (1ULL << BTN_FOOTER))  ? 2
+              : (ackBits & (1ULL << BTN_INFO))    ? 2
               : (ackBits & (1ULL << BTN_PIN))     ? 3 : 0;
         blinkLed(n, 80); // fast ack: even 3 blinks finish in ~480 ms
     }
@@ -557,7 +568,7 @@ void setup() {
                   bootCount, wakeReason());
 
     prefs.begin("frame", false);
-    footerVisible = prefs.getBool("footer", true);
+    infoVisible = prefs.getBool("info", false);
     held = prefs.getBool("held", false);
     // TZ env doesn't survive deep sleep: without this, footer times on
     // non-fetch wakes (footer/pin toggles) render as UTC. Fetch wakes
@@ -608,31 +619,37 @@ void setup() {
         wm.resetSettings();
     }
 
-    bool isToggleFooter = btnBits & (1ULL << BTN_FOOTER);
-    bool isToggleHold   = btnBits & (1ULL << BTN_PIN);
+    bool isToggleInfo = btnBits & (1ULL << BTN_INFO);
+    bool isToggleHold = btnBits & (1ULL << BTN_PIN);
 
-    if (isToggleFooter || isToggleHold) {
-        if (isToggleFooter) {
-            footerVisible = !footerVisible;
-            prefs.putBool("footer", footerVisible);
-            Serial.printf("footer now %s\n", footerVisible ? "on" : "off");
+    if (isToggleInfo || isToggleHold) {
+        if (isToggleInfo) {
+            infoVisible = !infoVisible;
+            prefs.putBool("info", infoVisible);
+            Serial.printf("info screen now %s\n", infoVisible ? "on" : "off");
         } else {
             held = !held;
             prefs.putBool("held", held);
             Serial.printf("held now %s\n", held ? "on" : "off");
             blinkLed(held ? 2 : 1);
         }
-        bool needRedraw = isToggleFooter || footerVisible;
-        if (needRedraw && loadFrame()) {
-            if (footerVisible)
-                drawStatusFooter(vbatMv, deltaMv, haveDelta);
+        if (infoVisible) {
+            // The info page is full-screen — no saved frame needed.
+            drawInfoScreen(vbatMv, deltaMv, haveDelta);
             Serial.println("updating panel (takes ~20-30 s)...");
             epaper.update();
             Serial.println("done");
-        } else if (needRedraw) {
-            // No saved frame yet — fall back to a full fetch instead.
-            doFetchCycle(vbatMv, deltaMv, haveDelta);
+        } else if (isToggleInfo) {
+            // Leaving the info page: restore the photo.
+            if (loadFrame()) {
+                Serial.println("updating panel (takes ~20-30 s)...");
+                epaper.update();
+                Serial.println("done");
+            } else {
+                doFetchCycle(vbatMv, deltaMv, haveDelta);
+            }
         }
+        // Hold toggled while the photo is showing: LED feedback only.
     } else {
         doFetchCycle(vbatMv, deltaMv, haveDelta);
     }
