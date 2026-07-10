@@ -7,9 +7,9 @@
 
 1. Make every runtime behavior the user cares about (refresh interval, image
    source, quiet hours, timezone, device name, orientation) configurable
-   **on the device itself** — no external service, ever. A long-press
-   gesture enters a config mode where the ESP32 serves a settings web page
-   on the local network.
+   **on the device itself** — no external service, ever. Pressing KEY1
+   shows a status page while the ESP32 serves a settings web page on the
+   local network.
 2. Prepare the repo for open-sourcing (license, README, CI, dependency
    pinning, tests).
 
@@ -42,40 +42,39 @@ Repo stays firmware-only. Two new modules, following the existing layout:
   the settings module.
 - NVS read failure ⇒ compiled defaults (indistinguishable from first boot).
 
-### `src/portal.*` (config mode)
+### `src/portal.*` (status page = config mode)
 
-- Joins saved Wi-Fi (STA), starts mDNS (`<name>.local`) and the ESP32
-  built-in `WebServer` on port 80.
+The former info page and config mode are **one thing**: the status page.
+While it is displayed, the settings portal is live. No long-press
+gestures anywhere — every button is a short press.
+
+- **KEY1 press** shows the status page: everything the info page shows
+  today (wake reason, battery, Wi-Fi, last/next refresh) plus the portal
+  URL, numeric IP, QR code (ricmoo/QRCode, MIT), and a compact button
+  legend with live state (e.g. "KEY3: unpin — currently pinned").
+- **Draw first, network second:** the page renders immediately from
+  NVS-cached data (a battery glance stays fast and network-free); Wi-Fi
+  join + mDNS (`<name>.local`) + the ESP32 built-in `WebServer` come up
+  in the background while the panel refreshes. If Wi-Fi fails, the
+  essentials are already on screen.
 - `GET /` — single embedded HTML settings page, pre-filled with current
   values. `POST /save` — server-side validation; invalid fields re-render
   the form with an error, nothing partially saved.
-- Panel draws a config screen: URL, numeric IP, QR code (ricmoo/QRCode,
-  MIT). mDNS failure is non-fatal — the IP is always shown.
 - Besides the settings form, the page mirrors device state and actions:
   a **paused checkbox** (KEY3's pin/freeze state — writes the existing
   `held` pref), a **"fetch new picture now"** action, and a
-  **"forget Wi-Fi"** action. The KEY2-at-power-on gesture stays as the
-  hardware recovery path (documented as such) for when saved credentials
-  are stale and the portal is unreachable.
-- No saved Wi-Fi ⇒ run the normal WiFiManager provisioning first, then
-  continue into the portal.
-
-### Entering / leaving config mode
-
-- **Long-press KEY1 (~1.5 s)** enters config mode; short press remains
-  "toggle info page." Works from deep sleep (EXT1 wake, then check the pin
-  is still held after boot) and in dev mode (the polled `pressed()` helper
-  learns hold duration). No conflict with the KEY2-at-power-on
-  forget-Wi-Fi gesture.
-- **Long-press ack:** crossing the 1.5 s threshold gets its own distinct
-  LED signal (one long steady blink) so the user can tell config mode
-  triggered vs a short press registered (short presses keep today's
-  count blinks).
-- **Exit:** a valid Save on the web page (the response page confirms
-  "saved — device is applying settings"), another long-press, or a
-  **10-minute inactivity timeout** (battery guard). A valid save always
-  exits; to adjust again, re-enter config mode. On exit the device runs a
-  normal fetch cycle so changes take effect visibly, then sleeps.
+  **"forget Wi-Fi"** action (the KEY2-at-power-on gesture is removed;
+  Wi-Fi reset lives only in the portal).
+- No saved Wi-Fi, or STA join fails (stale credentials, moved house) ⇒
+  fall back to the normal WiFiManager `EE02-Setup` AP provisioning flow.
+  This replaces the old hardware forget-Wi-Fi gesture as the recovery
+  path.
+- **Exit:** pressing KEY1 again, a valid Save on the web page (response
+  confirms "saved — device is applying settings"), or a **10-minute
+  inactivity timeout** — all three exit the same way: portal stops, a
+  normal fetch cycle runs so changes take effect visibly, photo is
+  redrawn, device sleeps. The panel never sits showing a dead portal URL.
+  A valid save always exits; to adjust again, press KEY1 again.
 
 ## Settings surface (v1)
 
@@ -107,10 +106,9 @@ Repo stays firmware-only. Two new modules, following the existing layout:
   quiet hours silently inactive.
 - **Timezone manual mode:** skips the ip-api.com call entirely (privacy +
   offline-friendly). Auto stays default.
-- **Info page button legend:** the info page gains a compact legend at the
-  bottom documenting all button functions including long-press behaviors,
-  with live state where relevant (e.g. "KEY3: unpin — currently pinned").
-  The device is self-documenting; no README needed at the frame.
+- **Button mapping (final, all short presses):** KEY1 = status page +
+  portal on/off; KEY2 = new picture; KEY3 = pin/freeze. The status page's
+  legend makes the device self-documenting; no README needed at the frame.
 
 ## Open-source prep (same milestone)
 
