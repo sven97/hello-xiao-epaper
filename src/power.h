@@ -1,0 +1,19 @@
+#pragma once
+#include <Arduino.h>
+
+// Battery voltage in millivolts via the S3's eFuse-calibrated ADC.
+int32_t readBatteryMv();
+
+// Rough state-of-charge estimate from a Li-ion discharge curve.
+int batteryPercent(int32_t mv);
+
+// LED feedback (active-LOW LED on LED_PIN).
+void blinkLed(int times, int onOffMs = 150);
+
+// Full deep sleep: panel to low power, enable-line GPIOs latched low,
+// timer + any-button wake armed. Never returns.
+void goToSleep();
+
+// Held timer wake: panel was never touched and the GPIO holds from the
+// previous sleep are still latched — just re-arm and go. Never returns.
+void quickSleep();

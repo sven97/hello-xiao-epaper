@@ -1,2 +1,4 @@
 .pio/
 src/secrets.h
+docs/superpowers/
+.superpowers/
