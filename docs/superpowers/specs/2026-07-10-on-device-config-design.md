@@ -51,6 +51,12 @@ Repo stays firmware-only. Two new modules, following the existing layout:
   the form with an error, nothing partially saved.
 - Panel draws a config screen: URL, numeric IP, QR code (ricmoo/QRCode,
   MIT). mDNS failure is non-fatal — the IP is always shown.
+- Besides the settings form, the page mirrors device state and actions:
+  a **paused checkbox** (KEY3's pin/freeze state — writes the existing
+  `held` pref), a **"fetch new picture now"** action, and a
+  **"forget Wi-Fi"** action. The KEY2-at-power-on gesture stays as the
+  hardware recovery path (documented as such) for when saved credentials
+  are stale and the portal is unreachable.
 - No saved Wi-Fi ⇒ run the normal WiFiManager provisioning first, then
   continue into the portal.
 
@@ -61,6 +67,10 @@ Repo stays firmware-only. Two new modules, following the existing layout:
   is still held after boot) and in dev mode (the polled `pressed()` helper
   learns hold duration). No conflict with the KEY2-at-power-on
   forget-Wi-Fi gesture.
+- **Long-press ack:** crossing the 1.5 s threshold gets its own distinct
+  LED signal (one long steady blink) so the user can tell config mode
+  triggered vs a short press registered (short presses keep today's
+  count blinks).
 - **Exit:** a valid Save on the web page (the response page confirms
   "saved — device is applying settings"), another long-press, or a
   **10-minute inactivity timeout** (battery guard). A valid save always
@@ -97,6 +107,10 @@ Repo stays firmware-only. Two new modules, following the existing layout:
   quiet hours silently inactive.
 - **Timezone manual mode:** skips the ip-api.com call entirely (privacy +
   offline-friendly). Auto stays default.
+- **Info page button legend:** the info page gains a compact legend at the
+  bottom documenting all button functions including long-press behaviors,
+  with live state where relevant (e.g. "KEY3: unpin — currently pinned").
+  The device is self-documenting; no README needed at the frame.
 
 ## Open-source prep (same milestone)
 
