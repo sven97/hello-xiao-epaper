@@ -3,6 +3,7 @@
 #include "display.h"
 #include "driver/gpio.h"
 #include "soc/usb_serial_jtag_reg.h"
+#include "logic/battery_curve.h"
 
 // A USB *host* (not a charger) sends a Start-of-Frame token every 1 ms,
 // which increments the USB-Serial-JTAG frame counter. Sampling it twice a
@@ -44,26 +45,7 @@ int32_t readBatteryMv() {
 // Rough state-of-charge from a typical Li-ion discharge curve (resting
 // voltage). No fuel gauge on board, so this is an estimate: reads a few
 // percent high while charging and low under load.
-int batteryPercent(int32_t mv) {
-    struct Point { int16_t mv; uint8_t pct; };
-    static const Point CURVE[] = {
-        {4200, 100}, {4100, 94}, {4000, 85}, {3900, 74}, {3800, 62},
-        {3700, 48},  {3600, 29}, {3500, 13}, {3400, 6},  {3300, 3},
-        {3200, 1},   {3000, 0},
-    };
-    const int N = sizeof(CURVE) / sizeof(CURVE[0]);
-    if (mv >= CURVE[0].mv) return 100;
-    if (mv <= CURVE[N - 1].mv) return 0;
-    for (int i = 1; i < N; i++) {
-        if (mv >= CURVE[i].mv) {
-            return CURVE[i].pct +
-                   (int)(mv - CURVE[i].mv) *
-                       (CURVE[i - 1].pct - CURVE[i].pct) /
-                       (CURVE[i - 1].mv - CURVE[i].mv);
-        }
-    }
-    return 0;
-}
+int batteryPercent(int32_t mv) { return batteryPercentFromMv((int)mv); }
 
 void blinkLed(int times, int onOffMs) {
     for (int i = 0; i < times; i++) {
