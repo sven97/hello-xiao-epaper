@@ -3,6 +3,10 @@
 #include "display.h"
 #include "driver/gpio.h"
 #include "soc/usb_serial_jtag_reg.h"
+#include "logic/battery_curve.h"
+#include "logic/quiet_hours.h"
+#include "settings.h"
+#include <time.h>
 
 // A USB *host* (not a charger) sends a Start-of-Frame token every 1 ms,
 // which increments the USB-Serial-JTAG frame counter. Sampling it twice a
@@ -44,26 +48,7 @@ int32_t readBatteryMv() {
 // Rough state-of-charge from a typical Li-ion discharge curve (resting
 // voltage). No fuel gauge on board, so this is an estimate: reads a few
 // percent high while charging and low under load.
-int batteryPercent(int32_t mv) {
-    struct Point { int16_t mv; uint8_t pct; };
-    static const Point CURVE[] = {
-        {4200, 100}, {4100, 94}, {4000, 85}, {3900, 74}, {3800, 62},
-        {3700, 48},  {3600, 29}, {3500, 13}, {3400, 6},  {3300, 3},
-        {3200, 1},   {3000, 0},
-    };
-    const int N = sizeof(CURVE) / sizeof(CURVE[0]);
-    if (mv >= CURVE[0].mv) return 100;
-    if (mv <= CURVE[N - 1].mv) return 0;
-    for (int i = 1; i < N; i++) {
-        if (mv >= CURVE[i].mv) {
-            return CURVE[i].pct +
-                   (int)(mv - CURVE[i].mv) *
-                       (CURVE[i - 1].pct - CURVE[i].pct) /
-                       (CURVE[i - 1].mv - CURVE[i].mv);
-        }
-    }
-    return 0;
-}
+int batteryPercent(int32_t mv) { return batteryPercentFromMv((int)mv); }
 
 void blinkLed(int times, int onOffMs) {
     for (int i = 0; i < times; i++) {
@@ -74,8 +59,22 @@ void blinkLed(int times, int onOffMs) {
     }
 }
 
+static int secondsOfLocalDay(time_t now) {
+    struct tm lt;
+    localtime_r(&now, &lt);
+    return lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec;
+}
+
+uint32_t plannedSleepSecs() {
+    time_t now = time(nullptr);
+    if (now <= CLOCK_SANE_EPOCH) return settings.sleepSecs;
+    return quietAdjustedSleep(secondsOfLocalDay(now), settings.sleepSecs,
+                              settings.quietEnabled, settings.quietStartHour,
+                              settings.quietEndHour);
+}
+
 void goToSleep() {
-    uint64_t secs = SLEEP_SECONDS;
+    uint64_t secs = plannedSleepSecs();
     Serial.printf("sleeping %llu s (buttons also wake)...\n", secs);
     Serial.flush();
     epaper.sleep();                    // panel low-power mode
@@ -91,10 +90,18 @@ void goToSleep() {
     esp_deep_sleep_start();
 }
 
-void quickSleep() {
-    Serial.printf("nothing to do — back to sleep %llu s\n", SLEEP_SECONDS);
+void quickSleep(uint32_t secs) {
+    Serial.printf("nothing to do — back to sleep %u s\n", secs);
     Serial.flush();
-    esp_sleep_enable_timer_wakeup(SLEEP_SECONDS * 1000000ULL);
+    esp_sleep_enable_timer_wakeup((uint64_t)secs * 1000000ULL);
     esp_sleep_enable_ext1_wakeup(BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
     esp_deep_sleep_start();
+}
+
+bool buttonPressed(uint8_t pin) {
+    if (digitalRead(pin) != LOW) return false;
+    delay(30);
+    if (digitalRead(pin) != LOW) return false;
+    while (digitalRead(pin) == LOW) delay(10);
+    return true;
 }

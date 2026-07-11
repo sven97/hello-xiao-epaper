@@ -2,20 +2,26 @@
 #include "config.h"
 #include "display.h"
 #include "state.h"
+#include "settings.h"
+#include "logic/url_template.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <time.h>
 
-// picsum serves progressive JPEGs, which embedded decoders can't parse;
-// images.weserv.nl re-encodes to baseline. The random= value defeats
-// weserv's cache so every fetch is a different picture.
+// The image source is a user-configurable URL template; {seed} defeats
+// upstream caches per fetch, {width}/{height} follow the panel rotation.
+// Default: weserv re-encode of picsum (embedded decoders need baseline
+// JPEG, weserv converts progressive -> baseline at exact panel size).
 static String imageUrl() {
-    return "https://images.weserv.nl/?url=picsum.photos/1200/1600"
-           "%3Frandom%3D" + String(esp_random()) + "&output=jpg";
+    std::string u = renderUrlTemplate(settings.imageUrl.c_str(), esp_random(),
+                                      epaper.width(), epaper.height());
+    return String(u.c_str());
 }
 
+// Layout note: all y-coordinates stay under 1200 so the screen renders
+// in both portrait (1600 tall) and landscape (1200 tall).
 static void showProvisioningScreen() {
     epaper.fillScreen(TFT_WHITE);
     epaper.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -27,7 +33,7 @@ static void showProvisioningScreen() {
     epaper.drawString("2. Open http://192.168.4.1 in a browser", 20, 300, 4);
     epaper.drawString("3. Pick your 2.4 GHz network, enter its password", 20, 360, 4);
     epaper.drawString("The board remembers it for future boots.", 20, 480, 4);
-    epaper.drawString("Hold button KEY2 at power-on to forget it.", 20, 540, 4);
+    epaper.drawString("Change or forget it later: press KEY1, open Settings.", 20, 540, 4);
     epaper.update();
 }
 
@@ -67,6 +73,7 @@ bool connectWifi() {
         Serial.printf("connected to %s, IP %s, RSSI %d dBm\n",
                       WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
                       WiFi.RSSI());
+        prefs.putString("lastIp", WiFi.localIP().toString());
     } else {
         Serial.println("provisioning timed out");
     }
@@ -177,9 +184,11 @@ static long detectUtcOffset() {
 }
 
 // One NTP sync per wake — the RTC drifts and deep sleep is long, and we're
-// online anyway. configTime sets both the TZ offset and SNTP in one call.
+// online anyway. In manual timezone mode the ip-api call is skipped
+// entirely (privacy: no geolocation; also works on offline-only LANs).
 bool syncClock() {
-    configTime(detectUtcOffset(), 0, "pool.ntp.org");
+    long off = settings.tzAuto ? detectUtcOffset() : prefs.getLong("tzOff", 0);
+    configTime(off, 0, "pool.ntp.org");
     struct tm now;
     return getLocalTime(&now, 10000);
 }

@@ -1,9 +1,12 @@
 #include "display.h"
 #include "config.h"
+#include "settings.h"
+#include "state.h"
 #include <JPEGDecoder.h>
-#include <LittleFS.h>
 
 EPaper epaper;
+
+void applyOrientation() { epaper.setRotation(settings.rotation); }
 
 // Spectra 6 palette: panel nibble index (drawPixel stores it directly at
 // 4 bpp) + sRGB approximation used as the dithering target.
@@ -107,33 +110,6 @@ bool renderJpeg(uint8_t *buf, size_t len) {
     bool ok = ditherToPanel(fb, w, h);
     free(fb);
     return ok;
-}
-
-// The sprite's raw 4 bpp buffer IS the display state (post-rotation), so a
-// byte dump of it round-trips the picture exactly. Saved right after the
-// dither, so redraws start from the clean photo.
-bool saveFrame() {
-    File f = LittleFS.open(FRAME_PATH, "w");
-    if (!f) { Serial.println("frame save: open failed"); return false; }
-    uint8_t *buf = (uint8_t *)epaper.frameBuffer(1);
-    size_t written = f.write(buf, FRAME_BYTES);
-    f.close();
-    Serial.printf("frame save: %u bytes\n", (unsigned)written);
-    return written == FRAME_BYTES;
-}
-
-bool loadFrame() {
-    File f = LittleFS.open(FRAME_PATH, "r");
-    if (!f || f.size() != FRAME_BYTES) {
-        Serial.println("frame load: missing or wrong size");
-        if (f) f.close();
-        return false;
-    }
-    uint8_t *buf = (uint8_t *)epaper.frameBuffer(1);
-    size_t got = f.read(buf, FRAME_BYTES);
-    f.close();
-    Serial.printf("frame load: %u bytes\n", (unsigned)got);
-    return got == FRAME_BYTES;
 }
 
 void showError(const String &msg) {

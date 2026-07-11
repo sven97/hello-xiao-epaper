@@ -1,18 +1,20 @@
 // EE02 e-paper photo frame — wake, act, deep-sleep. See README.md.
 #include <Arduino.h>
-#include <LittleFS.h>
 #include <WiFiManager.h>
 #include "driver/gpio.h"
+#include <time.h>
 
 #include "config.h"
 #include "display.h"
+#include "logic/quiet_hours.h"
 #include "net.h"
+#include "portal.h"
 #include "power.h"
+#include "settings.h"
 #include "state.h"
 #include "ui.h"
 
 Preferences prefs; // NVS namespace "frame"
-bool infoVisible = false;
 bool held = false;
 
 RTC_DATA_ATTR uint32_t bootCount = 0;
@@ -33,64 +35,59 @@ static int32_t readBatteryWithDelta(int32_t &deltaMv, bool &haveDelta) {
     return vbatMv;
 }
 
-// Fetch a new photo, dither it, persist it, and show it full-bleed.
-// Called for the "real" fetch wakes (power-on / btn-new-pic / timer) and
-// as the fallback when a toggle wake finds no saved frame yet.
-static void doFetchCycle(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
+// Fetch a new photo, dither it, and show it full-bleed.
+static void doFetchCycle() {
     if (!connectWifi()) {
         showError("wifi setup failed or timed out");
     } else if (fetchImage()) {
         syncClock();
-        saveFrame();
         recordFetchMetadata();
-        // A new photo always shows the photo — leave the info page.
-        if (infoVisible) {
-            infoVisible = false;
-            prefs.putBool("info", false);
-        }
         Serial.println("updating panel (takes ~20-30 s)...");
         epaper.update();
         Serial.println("done");
     }
 }
 
-// BTN_INFO / BTN_PIN wakes: flip the state, then draw whatever the new
-// state calls for (info page, restored photo, or nothing).
-static void handleToggleWake(bool isToggleInfo, int32_t vbatMv,
-                             int32_t deltaMv, bool haveDelta) {
-    if (isToggleInfo) {
-        infoVisible = !infoVisible;
-        prefs.putBool("info", infoVisible);
-        Serial.printf("info screen now %s\n", infoVisible ? "on" : "off");
-    } else {
-        held = !held;
-        prefs.putBool("held", held);
-        Serial.printf("held now %s\n", held ? "on" : "off");
-        blinkLed(held ? 2 : 1);
+// KEY1: status page + settings portal. Draw first (from NVS cache, no
+// network), then bring Wi-Fi + the portal up — by the time the panel
+// finishes its ~30 s refresh and a phone is out, the portal is live.
+// Every exit path (KEY1 again, save, timeout, forget-wifi) falls through
+// to a fetch cycle so changes take effect visibly. Returns false only when
+// Wi-Fi never came up (provisioning fallback already drew its own screen);
+// the caller must not run a second connectWifi()/portal window in that case.
+static bool runStatusMode(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
+    drawStatusScreen(vbatMv, deltaMv, haveDelta);
+    Serial.println("updating panel (takes ~20-30 s)...");
+    epaper.update();
+    Serial.println("done");
+    if (!connectWifi()) return false; // provisioning fallback already drew
+    if (!startPortal()) return true;
+    PortalResult r = runPortal(10 * 60 * 1000UL);
+    switch (r) {
+        case PortalResult::KeyExit: Serial.println("portal: KEY1 exit"); break;
+        case PortalResult::Timeout: Serial.println("portal: idle timeout"); break;
+        case PortalResult::Saved: break;      // logged in the handler
+        case PortalResult::ForgetWifi: break; // next connect reopens provisioning
     }
-    if (infoVisible) {
-        // The info page is full-screen — no saved frame needed.
-        drawInfoScreen(vbatMv, deltaMv, haveDelta);
-        Serial.println("updating panel (takes ~20-30 s)...");
-        epaper.update();
-        Serial.println("done");
-    } else if (isToggleInfo) {
-        // Leaving the info page: restore the photo.
-        if (loadFrame()) {
-            Serial.println("updating panel (takes ~20-30 s)...");
-            epaper.update();
-            Serial.println("done");
-        } else {
-            doFetchCycle(vbatMv, deltaMv, haveDelta);
-        }
-    }
-    // Hold toggled while the photo is showing: LED feedback only.
+    // Settings (rotation, url, ...) may have changed: reapply orientation
+    // before the fetch redraws the panel.
+    applyOrientation();
+    applyUtcOffset(prefs.getLong("tzOff", 0)); // manual TZ applies even if the fetch fails
+    return true;
+}
+
+// KEY3: flip pin/freeze. LED feedback only — the photo stays up.
+static void togglePin() {
+    held = !held;
+    prefs.putBool("held", held);
+    Serial.printf("held now %s\n", held ? "on" : "off");
+    blinkLed(held ? 2 : 1);
 }
 
 void setup() {
     // Instant acknowledgment: blink before anything else so a button press
     // gets feedback in ~0.5 s (the panel itself takes ~30 s to change).
-    // 1 blink = new picture, 2 = info page, 3 = pin/freeze.
+    // 1 blink = new picture, 2 = status page, 3 = pin/freeze.
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, HIGH);
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
@@ -110,22 +107,34 @@ void setup() {
     Serial.printf("ee02-frame: boot #%u, wake: %s\n", bootCount, wakeReason());
 
     prefs.begin("frame", false);
-    infoVisible = prefs.getBool("info", false);
+    loadSettings();
     held = prefs.getBool("held", false);
     // TZ env doesn't survive deep sleep: without this, times rendered on
-    // non-fetch wakes (info/pin toggles) come out as UTC. Fetch wakes
-    // overwrite it with a freshly detected offset in syncClock().
+    // non-fetch wakes come out as UTC. Fetch wakes overwrite it with a
+    // freshly detected (or manual) offset in syncClock().
     applyUtcOffset(prefs.getLong("tzOff", 0));
 
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     uint64_t btnBits = (cause == ESP_SLEEP_WAKEUP_EXT1)
                            ? esp_sleep_get_ext1_wakeup_status() : 0;
 
-    // Held timer wake: skip everything, don't even touch the panel. The
-    // GPIO holds from the previous sleep are still latched, so this must
-    // run before the hold-release below.
-    if (cause == ESP_SLEEP_WAKEUP_TIMER && held) quickSleep(); // no return
-
+    // Fast paths for timer wakes that shouldn't touch the panel: pinned,
+    // or the wake landed inside the quiet window. GPIO holds from the
+    // previous sleep stay latched, so these must run before hold-release.
+    if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+        if (held) quickSleep(plannedSleepSecs()); // no return
+        time_t now = time(nullptr);
+        if (settings.quietEnabled && now > CLOCK_SANE_EPOCH) {
+            struct tm lt;
+            localtime_r(&now, &lt);
+            int sod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec;
+            if (inQuietWindow(sod, settings.quietStartHour,
+                              settings.quietEndHour))
+                quickSleep(secondsUntilQuietEnd(
+                    sod, settings.quietStartHour,
+                    settings.quietEndHour)); // no return
+        }
+    }
 
     // Release the pin holds from the previous deep sleep (no-op on first
     // boot) so the panel and battery divider can be driven again.
@@ -141,71 +150,54 @@ void setup() {
     bool haveDelta;
     int32_t vbatMv = readBatteryWithDelta(deltaMv, haveDelta);
 
-    if (!LittleFS.begin(true)) Serial.println("LittleFS mount failed");
-
     epaper.begin();
+    applyOrientation(); // settings.rotation; UI + dither target follow
 
-    // Hold BTN_NEW_PIC through power-on (still held after the 2 s boot
-    // delay) to forget saved wifi. Gated on the power-on wake cause:
-    // button wakes only pay a 200 ms boot delay, so a moderately long
-    // press could still be down here — cause gating (not just release
-    // timing) keeps this a power-on-only gesture.
-    if (cause == ESP_SLEEP_WAKEUP_UNDEFINED &&
-        digitalRead(BTN_NEW_PIC) == LOW) {
-        Serial.println("KEY2 held at boot — forgetting saved wifi");
-        WiFiManager wm;
-        wm.resetSettings();
+    if (btnBits & (1ULL << BTN_PIN)) {
+        togglePin(); // photo stays up; no fetch, no panel touch
+    } else if (btnBits & (1ULL << BTN_INFO)) {
+        if (runStatusMode(vbatMv, deltaMv, haveDelta)) doFetchCycle();
+        else showError("wifi setup failed or timed out");
+    } else {
+        doFetchCycle(); // power-on / btn-new-pic / timer
     }
-
-    bool isToggleInfo = btnBits & (1ULL << BTN_INFO);
-    bool isToggleHold = btnBits & (1ULL << BTN_PIN);
-
-    if (isToggleInfo || isToggleHold)
-        handleToggleWake(isToggleInfo, vbatMv, deltaMv, haveDelta);
-    else
-        doFetchCycle(vbatMv, deltaMv, haveDelta);
 
     digitalWrite(LED_PIN, HIGH);
     maybeSleep(); // deep sleep — or return, in dev mode, and run loop()
 }
 
-// Debounced falling-edge press: returns true once per physical press.
-static bool pressed(uint8_t pin) {
-    if (digitalRead(pin) != LOW) return false;
-    delay(30);
-    if (digitalRead(pin) != LOW) return false;
-    while (digitalRead(pin) == LOW) delay(10);
-    return true;
-}
-
 // Only runs in dev mode (USB host attached): the port stays up for
 // instant flashing, buttons are polled instead of EXT1-woken, and the
-// hourly photo cadence still applies. Host gone -> normal deep sleep.
+// configured photo cadence still applies. Host gone -> normal deep sleep.
 void loop() {
     if (!usbHostPresent()) {
         Serial.println("usb host gone — leaving dev mode");
         goToSleep(); // never returns
     }
 
-    bool info = pressed(BTN_INFO);
-    bool pin = !info && pressed(BTN_PIN);
-    bool newPic = !info && !pin && pressed(BTN_NEW_PIC);
+    bool info = buttonPressed(BTN_INFO);
+    bool pin = !info && buttonPressed(BTN_PIN);
+    bool newPic = !info && !pin && buttonPressed(BTN_NEW_PIC);
 
     bool fetchDue = false;
     if (!held) {
         time_t lastFetch = (time_t)prefs.getULong("lastEpoch", 0);
-        fetchDue = time(nullptr) - lastFetch >= (time_t)SLEEP_SECONDS;
+        fetchDue = time(nullptr) - lastFetch >= (time_t)settings.sleepSecs;
     }
 
-    if (info || pin || newPic || fetchDue) {
+    if (pin) {
+        togglePin();
+    } else if (info || newPic || fetchDue) {
         digitalWrite(LED_PIN, LOW);
         int32_t deltaMv;
         bool haveDelta;
         int32_t vbatMv = readBatteryWithDelta(deltaMv, haveDelta);
-        if (info || pin)
-            handleToggleWake(info, vbatMv, deltaMv, haveDelta);
-        else
-            doFetchCycle(vbatMv, deltaMv, haveDelta);
+        if (info) {
+            if (runStatusMode(vbatMv, deltaMv, haveDelta)) doFetchCycle();
+            else showError("wifi setup failed or timed out");
+        } else {
+            doFetchCycle();
+        }
         digitalWrite(LED_PIN, HIGH);
     }
 

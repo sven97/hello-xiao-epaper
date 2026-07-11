@@ -1,4 +1,6 @@
 .pio/
 src/secrets.h
-docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
+!docs/superpowers/plans/
 .superpowers/
