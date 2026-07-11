@@ -6,7 +6,6 @@
 #include "settings.h"
 #include "state.h"
 #include <WiFi.h>
-#include <qrcode.h>
 #include <time.h>
 
 const char *wakeReason() {
@@ -31,24 +30,6 @@ void recordFetchMetadata() {
         prefs.putULong("lastEpoch", (uint32_t)now);
     prefs.putString("wifiDesc",
                     WiFi.SSID() + " " + String(WiFi.RSSI()) + "dBm");
-}
-
-// QR code for the portal URL. Version 4 (33x33 modules) fits
-// "http://<24-char-name>.local" at ECC_LOW with room to spare.
-static void drawQr(const String &text, int cx, int cy, int scale) {
-    QRCode qr;
-    uint8_t data[qrcode_getBufferSize(4)];
-    if (qrcode_initText(&qr, data, 4, ECC_LOW, text.c_str()) != 0) return;
-    const int px = qr.size * scale;
-    const int x0 = cx - px / 2, y0 = cy - px / 2;
-    // Quiet zone: 4 modules of white on every side.
-    epaper.fillRect(x0 - 4 * scale, y0 - 4 * scale, px + 8 * scale,
-                    px + 8 * scale, TFT_WHITE);
-    for (int y = 0; y < qr.size; y++)
-        for (int x = 0; x < qr.size; x++)
-            if (qrcode_getModule(&qr, x, y))
-                epaper.fillRect(x0 + x * scale, y0 + y * scale, scale, scale,
-                                TFT_BLACK);
 }
 
 void drawStatusScreen(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
@@ -123,7 +104,7 @@ void drawStatusScreen(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
     const int bandBottom = legendTop - 30;
     const int qrCy = (bandTop + bandBottom) / 2;
     const int scale = min(8, (bandBottom - bandTop) / (33 + 8));
-    drawQr(url, cx, qrCy, scale);
+    drawQrCode(url, cx, qrCy, scale);
 
     // Button legend with live state — the frame documents itself.
     epaper.drawString("KEY1: back to photo (settings portal is on while "

@@ -20,20 +20,34 @@ static String imageUrl() {
     return String(u.c_str());
 }
 
-// Layout note: all y-coordinates stay under 1200 so the screen renders
-// in both portrait (1600 tall) and landscape (1200 tall).
+// First-boot / stale-credentials instructions. Everything centered and
+// sized from the panel so it renders in every rotation; all y <= 1150
+// fits the 1200 px landscape height. Phones join the open hotspot from
+// the first QR; the captive-portal page usually pops up by itself.
 static void showProvisioningScreen() {
+    const int cx = epaper.width() / 2;
     epaper.fillScreen(TFT_WHITE);
+    epaper.setTextDatum(MC_DATUM);
     epaper.setTextColor(TFT_BLACK, TFT_WHITE);
-    epaper.drawString("Wi-Fi setup", 20, 40, 4);
-    epaper.drawString("1. On your phone, join the Wi-Fi network:", 20, 160, 4);
-    epaper.setTextColor(TFT_BLUE, TFT_WHITE);
-    epaper.drawString(AP_NAME, 60, 220, 4);
-    epaper.setTextColor(TFT_BLACK, TFT_WHITE);
-    epaper.drawString("2. Open http://192.168.4.1 in a browser", 20, 300, 4);
-    epaper.drawString("3. Pick your 2.4 GHz network, enter its password", 20, 360, 4);
-    epaper.drawString("The board remembers it for future boots.", 20, 480, 4);
-    epaper.drawString("Change or forget it later: press KEY1, open Settings.", 20, 540, 4);
+    epaper.setTextSize(2);
+    epaper.drawString("Wi-Fi setup", cx, 90, 4);
+    epaper.drawString("1. Scan to join the frame's hotspot:", cx, 210, 4);
+    drawQrCode("WIFI:S:" + String(AP_NAME) + ";;", cx, 400, 4);
+    epaper.setTextSize(1);
+    epaper.drawString("(or join \"" + String(AP_NAME) + "\" manually)",
+                      cx, 545, 4);
+    epaper.setTextSize(2);
+    epaper.drawString("2. A setup page opens by itself.", cx, 660, 4);
+    epaper.setTextSize(1);
+    epaper.drawString("If it doesn't, scan this or visit http://192.168.4.1:",
+                      cx, 725, 4);
+    drawQrCode("http://192.168.4.1", cx, 880, 4);
+    epaper.setTextSize(2);
+    epaper.drawString("3. Pick your 2.4 GHz network.", cx, 1060, 4);
+    epaper.setTextSize(1);
+    epaper.drawString("Change or forget it later: press KEY1, open Settings.",
+                      cx, 1140, 4);
+    epaper.setTextDatum(TL_DATUM);
     epaper.update();
 }
 

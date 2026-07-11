@@ -44,8 +44,7 @@ partial-refresh mode** (color e-ink waveforms are full-panel only).
 ## First-time setup
 
 1. Connect the panel's FPC cable, flip the power switch on, plug in USB-C.
-2. The panel shows Wi-Fi instructions: join the `EE02-Setup` hotspot from
-   a phone, open `http://192.168.4.1`, pick your **2.4 GHz** network.
+2. The panel shows two QR codes: scan the first to join the frame's hotspot (EE02-Setup), and the setup page opens by itself (second QR / http://192.168.4.1 as fallback). Pick your 2.4 GHz network.
 3. Credentials persist on-device (NVS). Nothing secret ever enters this repo.
 
 ## Settings

@@ -24,6 +24,6 @@ Manual pass on a real EE02 before tagging a release. Monitor at 115200.
 ## Regressions
 - [ ] KEY2: 1 blink, new photo
 - [ ] KEY3: 2/1 blinks, pin/unpin; pinned timer wake stays asleep (log)
-- [ ] Cold boot with no Wi-Fi saved: provisioning screen + hotspot works
+- [ ] Cold boot with no Wi-Fi saved: provisioning screen with two scannable QR codes; hotspot QR joins, portal QR opens the page
 - [ ] Dev mode: plugged into a computer — stays awake, buttons polled, KEY1 portal session works, unplug → sleeps
 - [ ] Battery wake after unplugging: sleeps normally (no dev-mode leak)
