@@ -186,15 +186,6 @@ void setup() {
     maybeSleep(); // deep sleep — or return, in dev mode, and run loop()
 }
 
-// Debounced falling-edge press: returns true once per physical press.
-static bool pressed(uint8_t pin) {
-    if (digitalRead(pin) != LOW) return false;
-    delay(30);
-    if (digitalRead(pin) != LOW) return false;
-    while (digitalRead(pin) == LOW) delay(10);
-    return true;
-}
-
 // Only runs in dev mode (USB host attached): the port stays up for
 // instant flashing, buttons are polled instead of EXT1-woken, and the
 // hourly photo cadence still applies. Host gone -> normal deep sleep.
@@ -204,9 +195,9 @@ void loop() {
         goToSleep(); // never returns
     }
 
-    bool info = pressed(BTN_INFO);
-    bool pin = !info && pressed(BTN_PIN);
-    bool newPic = !info && !pin && pressed(BTN_NEW_PIC);
+    bool info = buttonPressed(BTN_INFO);
+    bool pin = !info && buttonPressed(BTN_PIN);
+    bool newPic = !info && !pin && buttonPressed(BTN_NEW_PIC);
 
     bool fetchDue = false;
     if (!held) {

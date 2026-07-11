@@ -97,3 +97,11 @@ void quickSleep(uint32_t secs) {
     esp_sleep_enable_ext1_wakeup(BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
     esp_deep_sleep_start();
 }
+
+bool buttonPressed(uint8_t pin) {
+    if (digitalRead(pin) != LOW) return false;
+    delay(30);
+    if (digitalRead(pin) != LOW) return false;
+    while (digitalRead(pin) == LOW) delay(10);
+    return true;
+}
