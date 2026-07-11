@@ -11,6 +11,7 @@ const char *wakeReason();
 // doesn't describe.
 void recordFetchMetadata();
 
-// Full-screen status page — BTN_INFO toggles between this and the photo.
-// Draws into the sprite only; the caller calls epaper.update().
-void drawInfoScreen(int32_t vbatMv, int32_t deltaMv, bool haveDelta);
+// Full-screen status page: wake/battery/wifi/refresh info, the settings
+// portal URL + QR code, and a button legend with live state. Draws into
+// the sprite only; the caller starts the portal and calls epaper.update().
+void drawStatusScreen(int32_t vbatMv, int32_t deltaMv, bool haveDelta);

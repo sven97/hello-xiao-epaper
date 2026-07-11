@@ -73,7 +73,7 @@ static void handleToggleWake(bool isToggleInfo, int32_t vbatMv,
     }
     if (infoVisible) {
         // The info page is full-screen — no saved frame needed.
-        drawInfoScreen(vbatMv, deltaMv, haveDelta);
+        drawStatusScreen(vbatMv, deltaMv, haveDelta);
         Serial.println("updating panel (takes ~20-30 s)...");
         epaper.update();
         Serial.println("done");
