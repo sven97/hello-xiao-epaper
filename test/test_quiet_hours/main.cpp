@@ -53,6 +53,17 @@ void test_seconds_until_end() {
     TEST_ASSERT_EQUAL_UINT32(8 * H, secondsUntilQuietEnd(23 * H, 23, 7));
 }
 
+void test_seconds_until_end_simple_window() {
+    TEST_ASSERT_EQUAL_UINT32(2 * H, secondsUntilQuietEnd(3 * H, 1, 5));
+    TEST_ASSERT_EQUAL_UINT32(0, secondsUntilQuietEnd(6 * H, 1, 5));
+}
+
+void test_full_day_sleep_lands_where_it_started() {
+    // 24 h sleep starting inside 23-7: wake sod == now sod (inside) ->
+    // extended to the window end after the nominal wake.
+    TEST_ASSERT_EQUAL_UINT32(86400 + 4 * H, quietAdjustedSleep(3 * H, 86400, true, 23, 7));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_window_simple);
@@ -64,5 +75,7 @@ int main() {
     RUN_TEST(test_sleep_extends_simple_window);
     RUN_TEST(test_wake_exactly_at_end_passes);
     RUN_TEST(test_seconds_until_end);
+    RUN_TEST(test_seconds_until_end_simple_window);
+    RUN_TEST(test_full_day_sleep_lands_where_it_started);
     return UNITY_END();
 }

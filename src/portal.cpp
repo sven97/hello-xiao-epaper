@@ -49,8 +49,8 @@ static String tzOptions() {
                  ">Auto (IP geolocation)</option>";
     for (long o = -14L * 3600; o <= 14L * 3600; o += 900) {
         char label[16];
-        snprintf(label, sizeof(label), "UTC%+ld:%02ld", o / 3600,
-                 labs(o % 3600) / 60);
+        snprintf(label, sizeof(label), "UTC%c%ld:%02ld", o < 0 ? '-' : '+',
+                 labs(o) / 3600, (labs(o) % 3600) / 60);
         out += "<option value=\"" + String(o) + "\"" +
                (!settings.tzAuto && o == cur ? " selected" : "") + ">" +
                label + "</option>";
@@ -88,7 +88,6 @@ static String buildPage(const String &error) {
                  error.isEmpty() ? "" : "<div class=\"msg\">" + error + "</div>");
     page.replace("%NAME%", settings.name);
     page.replace("%SLEEP_OPTS%", sleepOptions(settings.sleepSecs));
-    page.replace("%URL%", htmlEscape(settings.imageUrl));
     page.replace("%PAUSED%", held ? "checked" : "");
     page.replace("%QUIET_EN%", settings.quietEnabled ? "checked" : "");
     page.replace("%QS_OPTS%",
@@ -97,6 +96,9 @@ static String buildPage(const String &error) {
                  selectOptions(0, 23, settings.quietEndHour, ":00"));
     page.replace("%TZ_OPTS%", tzOptions());
     page.replace("%ROT_OPTS%", rotOptions());
+    // Must be last: a stored URL containing a literal token string (e.g.
+    // "%PAUSED%") must not be re-substituted by a later replace() call.
+    page.replace("%URL%", htmlEscape(settings.imageUrl));
     return page;
 }
 

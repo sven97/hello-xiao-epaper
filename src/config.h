@@ -9,7 +9,7 @@ constexpr uint8_t BTN_KEY3 = 5;
 
 // Function assignment — the one place to remap button behavior.
 constexpr uint8_t BTN_INFO    = BTN_KEY1; // toggle full-screen info page
-constexpr uint8_t BTN_NEW_PIC = BTN_KEY2; // fetch new picture (+ forget-wifi gesture at power-on)
+constexpr uint8_t BTN_NEW_PIC = BTN_KEY2; // fetch new picture
 constexpr uint8_t BTN_PIN     = BTN_KEY3; // pin/freeze current picture
 
 constexpr uint64_t BUTTON_WAKE_MASK =

@@ -52,14 +52,16 @@ static void doFetchCycle() {
 // network), then bring Wi-Fi + the portal up — by the time the panel
 // finishes its ~30 s refresh and a phone is out, the portal is live.
 // Every exit path (KEY1 again, save, timeout, forget-wifi) falls through
-// to a fetch cycle so changes take effect visibly.
-static void runStatusMode(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
+// to a fetch cycle so changes take effect visibly. Returns false only when
+// Wi-Fi never came up (provisioning fallback already drew its own screen);
+// the caller must not run a second connectWifi()/portal window in that case.
+static bool runStatusMode(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
     drawStatusScreen(vbatMv, deltaMv, haveDelta);
     Serial.println("updating panel (takes ~20-30 s)...");
     epaper.update();
     Serial.println("done");
-    if (!connectWifi()) return; // provisioning fallback already drew
-    if (!startPortal()) return;
+    if (!connectWifi()) return false; // provisioning fallback already drew
+    if (!startPortal()) return true;
     PortalResult r = runPortal(10 * 60 * 1000UL);
     switch (r) {
         case PortalResult::KeyExit: Serial.println("portal: KEY1 exit"); break;
@@ -70,6 +72,8 @@ static void runStatusMode(int32_t vbatMv, int32_t deltaMv, bool haveDelta) {
     // Settings (rotation, url, ...) may have changed: reapply orientation
     // before the fetch redraws the panel.
     applyOrientation();
+    applyUtcOffset(prefs.getLong("tzOff", 0)); // manual TZ applies even if the fetch fails
+    return true;
 }
 
 // KEY3: flip pin/freeze. LED feedback only — the photo stays up.
@@ -152,8 +156,8 @@ void setup() {
     if (btnBits & (1ULL << BTN_PIN)) {
         togglePin(); // photo stays up; no fetch, no panel touch
     } else if (btnBits & (1ULL << BTN_INFO)) {
-        runStatusMode(vbatMv, deltaMv, haveDelta);
-        doFetchCycle(); // every portal exit shows a fresh photo
+        if (runStatusMode(vbatMv, deltaMv, haveDelta)) doFetchCycle();
+        else showError("wifi setup failed or timed out");
     } else {
         doFetchCycle(); // power-on / btn-new-pic / timer
     }
@@ -188,8 +192,12 @@ void loop() {
         int32_t deltaMv;
         bool haveDelta;
         int32_t vbatMv = readBatteryWithDelta(deltaMv, haveDelta);
-        if (info) runStatusMode(vbatMv, deltaMv, haveDelta);
-        doFetchCycle();
+        if (info) {
+            if (runStatusMode(vbatMv, deltaMv, haveDelta)) doFetchCycle();
+            else showError("wifi setup failed or timed out");
+        } else {
+            doFetchCycle();
+        }
         digitalWrite(LED_PIN, HIGH);
     }
 
