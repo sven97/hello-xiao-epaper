@@ -2,18 +2,22 @@
 #include "config.h"
 #include "display.h"
 #include "state.h"
+#include "settings.h"
+#include "logic/url_template.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <time.h>
 
-// picsum serves progressive JPEGs, which embedded decoders can't parse;
-// images.weserv.nl re-encodes to baseline. The random= value defeats
-// weserv's cache so every fetch is a different picture.
+// The image source is a user-configurable URL template; {seed} defeats
+// upstream caches per fetch, {width}/{height} follow the panel rotation.
+// Default: weserv re-encode of picsum (embedded decoders need baseline
+// JPEG, weserv converts progressive -> baseline at exact panel size).
 static String imageUrl() {
-    return "https://images.weserv.nl/?url=picsum.photos/1200/1600"
-           "%3Frandom%3D" + String(esp_random()) + "&output=jpg";
+    std::string u = renderUrlTemplate(settings.imageUrl.c_str(), esp_random(),
+                                      epaper.width(), epaper.height());
+    return String(u.c_str());
 }
 
 static void showProvisioningScreen() {
@@ -177,9 +181,11 @@ static long detectUtcOffset() {
 }
 
 // One NTP sync per wake — the RTC drifts and deep sleep is long, and we're
-// online anyway. configTime sets both the TZ offset and SNTP in one call.
+// online anyway. In manual timezone mode the ip-api call is skipped
+// entirely (privacy: no geolocation; also works on offline-only LANs).
 bool syncClock() {
-    configTime(detectUtcOffset(), 0, "pool.ntp.org");
+    long off = settings.tzAuto ? detectUtcOffset() : prefs.getLong("tzOff", 0);
+    configTime(off, 0, "pool.ntp.org");
     struct tm now;
     return getLocalTime(&now, 10000);
 }
