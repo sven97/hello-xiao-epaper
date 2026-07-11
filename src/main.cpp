@@ -35,17 +35,28 @@ static int32_t readBatteryWithDelta(int32_t &deltaMv, bool &haveDelta) {
     return vbatMv;
 }
 
-// Fetch a new photo, dither it, and show it full-bleed.
-static void doFetchCycle() {
-    if (!connectWifi()) {
-        showError("wifi setup failed or timed out");
-    } else if (fetchImage()) {
-        syncClock();
-        recordFetchMetadata();
-        Serial.println("updating panel (takes ~20-30 s)...");
-        epaper.update();
-        Serial.println("done");
+// Fetch a new photo, dither it, persist metadata, and show it full-bleed.
+// interactive=false (scheduled timer wakes): nobody is watching — on any
+// failure keep the current photo untouched, log, and let the next wake
+// retry. interactive=true (button presses, power-on, portal exits): draw
+// the error screen so the person standing there knows what happened.
+static void doFetchCycle(bool interactive) {
+    if (!connectWifi(interactive)) {
+        if (interactive) showError("Wi-Fi connection failed");
+        else Serial.println("wifi failed — keeping photo, retry next wake");
+        return;
     }
+    String err;
+    if (!fetchImage(err)) {
+        if (interactive) showError(err);
+        else Serial.println("fetch failed (" + err + ") — keeping photo");
+        return;
+    }
+    syncClock();
+    recordFetchMetadata();
+    Serial.println("updating panel (takes ~20-30 s)...");
+    epaper.update();
+    Serial.println("done");
 }
 
 // KEY1: status page + settings portal. Draw first (from NVS cache, no
@@ -156,10 +167,10 @@ void setup() {
     if (btnBits & (1ULL << BTN_PIN)) {
         togglePin(); // photo stays up; no fetch, no panel touch
     } else if (btnBits & (1ULL << BTN_INFO)) {
-        if (runStatusMode(vbatMv, deltaMv, haveDelta)) doFetchCycle();
-        else showError("wifi setup failed or timed out");
+        if (runStatusMode(vbatMv, deltaMv, haveDelta)) doFetchCycle(true);
+        else showError("Wi-Fi connection failed");
     } else {
-        doFetchCycle(); // power-on / btn-new-pic / timer
+        doFetchCycle(cause != ESP_SLEEP_WAKEUP_TIMER); // power-on / btn-new-pic / timer
     }
 
     digitalWrite(LED_PIN, HIGH);
@@ -193,10 +204,10 @@ void loop() {
         bool haveDelta;
         int32_t vbatMv = readBatteryWithDelta(deltaMv, haveDelta);
         if (info) {
-            if (runStatusMode(vbatMv, deltaMv, haveDelta)) doFetchCycle();
-            else showError("wifi setup failed or timed out");
+            if (runStatusMode(vbatMv, deltaMv, haveDelta)) doFetchCycle(true);
+            else showError("Wi-Fi connection failed");
         } else {
-            doFetchCycle();
+            doFetchCycle(newPic); // KEY2 is interactive; fetchDue is not
         }
         digitalWrite(LED_PIN, HIGH);
     }

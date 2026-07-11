@@ -19,6 +19,7 @@ Manual pass on a real EE02 before tagging a release. Monitor at 115200.
 - [ ] Paused checkbox: equals KEY3 (timer wakes take the quick-sleep path)
 - [ ] Fetch-new-picture button: new photo appears
 - [ ] Forget Wi-Fi: EE02-Setup hotspot reopens with instructions
+- [ ] Unplug the router, wait for a scheduled refresh: photo stays, serial logs "keeping photo"; press KEY2: centered error screen appears
 
 ## Regressions
 - [ ] KEY2: 1 blink, new photo

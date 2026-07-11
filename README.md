@@ -67,6 +67,8 @@ on the same Wi-Fi:
 The page also has **Fetch new picture now** and **Forget Wi-Fi** buttons.
 The portal stops when you leave the status page (press KEY1 again, save,
 or 10 minutes idle) — the device then fetches a picture and sleeps.
+Transient failures on scheduled refreshes never touch the panel — the
+current photo stays up and the next wake retries.
 If saved Wi-Fi stops working (new router, moved house), the frame
 reopens the `EE02-Setup` hotspot by itself.
 

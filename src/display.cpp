@@ -112,11 +112,20 @@ bool renderJpeg(uint8_t *buf, size_t len) {
     return ok;
 }
 
+// Full-panel error screen (calls update()). Only drawn when someone is
+// watching (button-initiated actions) — unattended wakes keep the photo.
 void showError(const String &msg) {
+    const int cx = epaper.width() / 2, cy = epaper.height() / 2;
     epaper.fillScreen(TFT_WHITE);
+    epaper.setTextDatum(MC_DATUM);
+    epaper.setTextSize(2);
     epaper.setTextColor(TFT_RED, TFT_WHITE);
-    epaper.drawString("ERROR", 20, 40, 4);
+    epaper.drawString("Something went wrong", cx, cy - 100, 4);
     epaper.setTextColor(TFT_BLACK, TFT_WHITE);
-    epaper.drawString(msg, 20, 120, 4);
+    epaper.drawString(msg, cx, cy, 4);
+    epaper.setTextSize(1);
+    epaper.drawString("Check your Wi-Fi, then press KEY2 to try again.",
+                      cx, cy + 90, 4);
+    epaper.setTextDatum(TL_DATUM);
     epaper.update();
 }
