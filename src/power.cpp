@@ -75,12 +75,18 @@ static void ledTask(void *) {
 
 void startLedTask() { xTaskCreate(ledTask, "led", 2048, nullptr, 1, nullptr); }
 
-void setLed(LedMode m) { ledMode = m; }
+void setLed(LedMode m) {
+    ledMode = m;
+    // Off must take effect synchronously: deep sleep may start before the
+    // task's next wakeup, and it would leave the pin held low.
+    if (m == LedMode::Off) digitalWrite(LED_PIN, HIGH);
+}
 
 void blinkLed(int times, int onOffMs) {
     LedMode prev = ledMode;
     ledMode = LedMode::Off;
-    delay(120); // let the task release the pin (its longest hold is 100 ms)
+    delay(120); // parks Off/Solid (<=100 ms holds). Contract: never call
+                // blinkLed while Heartbeat is active (880 ms holds).
     for (int i = 0; i < times; i++) {
         digitalWrite(LED_PIN, LOW);
         delay(onOffMs);
