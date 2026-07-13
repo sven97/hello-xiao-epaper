@@ -1,11 +1,13 @@
-# hello-xiao-epaper
+# hello-epaper
+
+**Standalone, zero-cloud firmware for the Seeed Studio XIAO ePaper Display
+Board family (EE02/EE03/EE04/EE05) — a battery-powered photo frame configured
+entirely from your phone, no cloud account or server required.**
 
 [![ci](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-Standalone, zero-cloud firmware for the **Seeed Studio XIAO ePaper Display**
-family (XIAO ESP32-S3 Plus + EE02/EE03/EE04/EE05 driver board) as a
-battery-powered photo frame. One firmware, one codebase, four
-`pio run -e <env>` targets — see [Supported hardware](#supported-hardware).
+One firmware, one codebase, four `pio run -e <env>` targets, all on the
+**XIAO ESP32-S3 Plus** — see [Supported hardware](#supported-hardware).
 
 Seeed ships these boards pre-flashed with SenseCraft HMI, a cloud-based
 no-code dashboard tool that requires an account and an internet connection to
