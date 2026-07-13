@@ -15,6 +15,25 @@ back to sleep. Everything is configured **on the device itself** — no
 account, no cloud, no companion server. This is a hobby project: support
 is best-effort, MIT-licensed, no warranty.
 
+## How it works
+
+The firmware is one loop: sleep, wake for a reason, act, sleep again.
+
+```mermaid
+flowchart TD
+    sleep([deep sleep]) -->|"timer: scheduled refresh"| fetch
+    sleep -->|"KEY2: new picture"| fetch
+    sleep -->|"KEY1: status page"| portal
+    sleep -->|"KEY3: pin / unpin"| pin
+    fetch["fetch photo → dither → refresh panel (~30 s)"] --> sleep
+    portal["status page on panel,<br>settings portal live on Wi-Fi"] -->|"save · KEY1 · 10 min idle"| fetch
+    pin["blink LED, toggle pin"] --> sleep
+```
+
+Timer wakes that have nothing to do — the photo is pinned, or the wake
+lands inside quiet hours — roll straight back to sleep without touching
+the panel or the radio.
+
 ## Supported hardware
 
 Exactly one combo: the EE02 board with the 13.3″ Spectra 6 panel
@@ -53,6 +72,14 @@ partial-refresh mode** (color e-ink waveforms are full-panel only).
 Press **KEY1**. The panel shows the status page (wake reason, last/next
 refresh, Wi-Fi, battery) plus a URL and QR code — open it from any device
 on the same Wi-Fi:
+
+```mermaid
+flowchart LR
+    a["press KEY1"] --> b["panel draws status page (~30 s)"]
+    b --> c["portal live at http://ee02.local"]
+    c --> d["phone: scan QR,<br>change settings, Save"]
+    d --> e["fresh photo,<br>back to sleep"]
+```
 
 | Setting | Choices | Default |
 |---|---|---|
