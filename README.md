@@ -13,11 +13,7 @@ image source, quiet hours, timezone, orientation — is configured from your
 phone talking directly to the device over your own Wi-Fi. Nothing else has
 to run, ever.
 
-<img src="docs/img/frame-illustration.svg" alt="Illustration of the frame mounted on a wall, showing a stylized six-color scene and its three buttons" width="360">
-
-*Original illustration, not a photo — button positions are illustrative,
-not necessarily the physical top-to-bottom order on the real board. Real
-photo pending.*
+<!-- PHOTO: frame on a wall showing a photo -->
 
 <img src="docs/img/status-page-mockup.png" alt="Status page: wake reason, last/next photo, Wi-Fi, battery, a QR code linking to the settings portal, and a button legend" width="360">
 
