@@ -1,4 +1,4 @@
-# open-xiao-epaper
+# hello-xiao-epaper
 
 [![ci](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
