@@ -1,8 +1,4 @@
-# hello-epaper
-
-**Standalone, zero-cloud firmware for the Seeed Studio XIAO ePaper Display
-Board family (EE02/EE03/EE04/EE05) — a battery-powered photo frame configured
-entirely from your phone, no cloud account or server required.**
+# Hello ePaper — Standalone, zero-cloud firmware for the Seeed Studio XIAO ePaper Display Board family (EE02/EE03/EE04/EE05)
 
 [![ci](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
