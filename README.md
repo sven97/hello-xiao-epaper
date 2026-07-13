@@ -70,7 +70,7 @@ see `docs/panel-combos.md`.
 | Part | Source |
 |---|---|
 | XIAO ePaper Display Board (EE02/EE03/EE04/EE05), XIAO ESP32-S3 Plus | Seeed Studio |
-| 3.7 V Li-ion battery, JST 1.25 | any (see battery notes) |
+| 3.7 V Li-ion battery, JST PH 2.0mm | any (see battery notes) |
 
 ## Buttons
 
