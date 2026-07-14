@@ -106,12 +106,20 @@ bool connectWifi(bool allowPortal) {
 // decides when to refresh). On failure fills err with a short
 // user-facing message and draws nothing.
 bool fetchImage(String &err) {
-    WiFiClientSecure client;
-    client.setInsecure(); // learning repo: skip cert validation
+    String url = imageUrl();
+    // Match the client to the URL's scheme: WiFiClientSecure always
+    // TLS-handshakes on connect() regardless of scheme, so handing it a
+    // plain http:// URL breaks against non-TLS servers (e.g. a NAS).
+    WiFiClientSecure secureClient;
+    WiFiClient plainClient;
+    secureClient.setInsecure(); // learning repo: skip cert validation
     HTTPClient http;
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    String url = imageUrl();
-    http.begin(client, url);
+    if (url.startsWith("https://")) {
+        http.begin(secureClient, url);
+    } else {
+        http.begin(plainClient, url);
+    }
     http.setTimeout(20000);
     Serial.printf("GET %s\n", url.c_str());
     int code = http.GET();
