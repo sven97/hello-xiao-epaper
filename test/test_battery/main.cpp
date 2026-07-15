@@ -12,6 +12,13 @@ void test_interpolates_midcurve() { TEST_ASSERT_EQUAL(38, batteryPercentFromMv(3
 void test_interpolates_top() { TEST_ASSERT_EQUAL(97, batteryPercentFromMv(4150)); }
 void test_interpolates_bottom() { TEST_ASSERT_EQUAL(2, batteryPercentFromMv(3250)); }
 
+void test_level_high_at_full() { TEST_ASSERT_TRUE(batteryLevelBucket(100) == BatteryLevel::High); }
+void test_level_high_boundary() { TEST_ASSERT_TRUE(batteryLevelBucket(41) == BatteryLevel::High); }
+void test_level_medium_boundary_high() { TEST_ASSERT_TRUE(batteryLevelBucket(40) == BatteryLevel::Medium); }
+void test_level_medium_boundary_low() { TEST_ASSERT_TRUE(batteryLevelBucket(16) == BatteryLevel::Medium); }
+void test_level_low_boundary() { TEST_ASSERT_TRUE(batteryLevelBucket(15) == BatteryLevel::Low); }
+void test_level_low_at_zero() { TEST_ASSERT_TRUE(batteryLevelBucket(0) == BatteryLevel::Low); }
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_full_at_4200);
@@ -21,5 +28,11 @@ int main() {
     RUN_TEST(test_interpolates_midcurve);
     RUN_TEST(test_interpolates_top);
     RUN_TEST(test_interpolates_bottom);
+    RUN_TEST(test_level_high_at_full);
+    RUN_TEST(test_level_high_boundary);
+    RUN_TEST(test_level_medium_boundary_high);
+    RUN_TEST(test_level_medium_boundary_low);
+    RUN_TEST(test_level_low_boundary);
+    RUN_TEST(test_level_low_at_zero);
     return UNITY_END();
 }

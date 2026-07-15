@@ -21,3 +21,13 @@ inline int batteryPercentFromMv(int mv) {
     }
     return 0;
 }
+
+enum class BatteryLevel : uint8_t { Low, Medium, High };
+
+// Thresholds match common phone/appliance conventions: red when
+// critically low, yellow as a mid-range warning, green otherwise.
+inline BatteryLevel batteryLevelBucket(int pct) {
+    if (pct <= 15) return BatteryLevel::Low;
+    if (pct <= 40) return BatteryLevel::Medium;
+    return BatteryLevel::High;
+}
