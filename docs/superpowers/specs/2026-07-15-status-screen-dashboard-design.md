@@ -31,7 +31,8 @@ Content shown, from top to bottom:
 1. **Header row**: "Hello ePaper" title (unchanged text), plus a small
    rounded badge showing the board model (e.g. `EE02`) in place of today's
    "XIAO ePaper Display Board EE02" subtitle line.
-2. **Tile row** — three equal-width bordered cells, the glanceable layer:
+2. **Tile row** — three equal-width cells (no visible border — spacing and
+   icon/value/label grouping alone separate them), the glanceable layer:
    - Battery: icon + `NN%`
    - Wi-Fi: icon + qualitative bucket word (`strong` / `fair` / `weak`)
      instead of raw dBm
