@@ -11,6 +11,7 @@
 #include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <time.h>
+#include <cstring>
 
 // The image source is a user-configurable URL template; {seed} defeats
 // upstream caches per fetch, {width}/{height} follow the panel rotation.
@@ -21,6 +22,45 @@ static String imageUrl() {
                                       epaper.width(), epaper.height());
     return String(u.c_str());
 }
+
+// Sink for HTTPClient::writeToStream() that grows a PSRAM buffer as data
+// arrives. getSize()/Content-Length can't gate the download: a server is
+// free to omit it entirely, either via chunked transfer-encoding or by
+// just closing the connection when the body ends (both common for an
+// on-the-fly generated image, e.g. a NAS resizing on request).
+// writeToStream() is what actually knows how to de-chunk and detect
+// end-of-body correctly for all of those framings -- getSize() alone
+// only covers the one case where Content-Length was sent up front.
+class PsramSink : public Stream {
+public:
+    ~PsramSink() { if (buf) free(buf); }
+    size_t write(uint8_t b) override { return write(&b, 1); }
+    size_t write(const uint8_t *data, size_t n) override {
+        if (len + n > cap) {
+            size_t newCap = cap ? cap : (size_t)64 * 1024;
+            while (newCap < len + n) newCap *= 2;
+            if (newCap > MAX_BYTES) { setWriteError(); tooLarge = true; return 0; }
+            uint8_t *grown = (uint8_t *)ps_realloc(buf, newCap);
+            if (!grown) { setWriteError(); return 0; }
+            buf = grown;
+            cap = newCap;
+        }
+        memcpy(buf + len, data, n);
+        len += n;
+        return n;
+    }
+    int available() override { return 0; }
+    int read() override { return -1; }
+    int peek() override { return -1; }
+
+    uint8_t *buf = nullptr;
+    size_t len = 0, cap = 0;
+    bool tooLarge = false;
+    // No panel this firmware supports needs anywhere near this much for
+    // one baseline JPEG frame -- guards a runaway/malformed chunked
+    // stream against exhausting PSRAM.
+    static constexpr size_t MAX_BYTES = 16UL * 1024 * 1024;
+};
 
 // First-boot / stale-credentials instructions. Everything centered and
 // sized from the panel so it renders in every rotation and panel size
@@ -128,39 +168,20 @@ bool fetchImage(String &err) {
         err = "image server said HTTP " + String(code);
         return false;
     }
-    int len = http.getSize();
-    if (len <= 0) {
-        http.end();
-        err = "image server sent no size";
-        return false;
-    }
-    uint8_t *buf = (uint8_t *)ps_malloc(len);
-    if (!buf) {
-        http.end();
-        err = "out of memory for the image";
-        return false;
-    }
-    WiFiClient *stream = http.getStreamPtr();
-    size_t got = 0;
-    uint32_t lastData = millis();
-    while (got < (size_t)len && millis() - lastData < 20000) {
-        size_t avail = stream->available();
-        if (avail) {
-            got += stream->readBytes(buf + got, min(avail, (size_t)len - got));
-            lastData = millis();
-        } else {
-            delay(10);
-        }
-    }
+    PsramSink sink;
+    int written = http.writeToStream(&sink);
     http.end();
-    if (got < (size_t)len) {
-        free(buf);
-        err = "image download was cut off";
+    if (written < 0) {
+        err = sink.tooLarge ? "image too large for available memory"
+                            : "image download failed: " + http.errorToString(written);
+        return false;
+    }
+    if (sink.len == 0) {
+        err = "image server sent no data";
         return false;
     }
     epaper.fillScreen(TFT_WHITE);
-    bool rendered = renderJpeg(buf, got);
-    free(buf);
+    bool rendered = renderJpeg(sink.buf, sink.len);
     if (!rendered) {
         err = "that URL is not a baseline JPEG";
         return false;
