@@ -1,5 +1,7 @@
 #pragma once
 #include <TFT_eSPI.h> // Seeed_GFX; provides EPaper for the selected combo
+#include "logic/battery_curve.h"
+#include "logic/wifi_strength.h"
 
 extern EPaper epaper;
 
@@ -18,6 +20,24 @@ void applyOrientation();
 // 4-module white quiet zone. Draws into the sprite only. Payload must fit
 // version 4 at ECC_LOW (78 bytes).
 void drawQrCode(const String &text, int cx, int cy, int scale);
+
+// Status-screen dashboard icons (battery/Wi-Fi/next-photo tiles). All
+// built from fillRect/fillCircle/fillTriangle primitives -- no image
+// assets, same approach drawQrCode already uses. Each is centered at
+// (cx, cy) with r setting overall icon scale.
+void drawBatteryIcon(int cx, int cy, int r, int pct, uint32_t fillColor, bool charging);
+void drawWifiIcon(int cx, int baseY, int r, WifiStrength level);
+void drawNextPhotoIcon(int cx, int cy, int r, bool pinned);
+
+// Board-appropriate battery fill color: functional green/yellow/red on
+// 6-color Spectra panels (EE02), solid black everywhere else -- the
+// percentage number and bar fill length already carry the information on
+// grayscale/mono panels, so no data is lost by dropping the color cue.
+uint32_t batteryColorForLevel(BatteryLevel level);
+
+// Board-appropriate charging-indicator color: blue on 6-color Spectra
+// panels, black everywhere else.
+uint32_t chargingBoltColor();
 
 // Decode a baseline JPEG into PSRAM, Floyd-Steinberg dither it to the
 // panel's palette, and write it into the sprite (no update()).
