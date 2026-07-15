@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 // Rough Li-ion state-of-charge from resting voltage. Pure logic: host-testable.
 
 inline int batteryPercentFromMv(int mv) {

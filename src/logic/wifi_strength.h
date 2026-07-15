@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 // Wi-Fi signal-quality bucketing from RSSI. Pure logic: host-testable.
 
 enum class WifiStrength : uint8_t { Weak, Fair, Strong };
